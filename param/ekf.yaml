@@ -1,0 +1,31 @@
+# EKF のパラメータ（共通）。環境ごとの値（フレーム名など）は localization_bringup の param/env/*.yaml で上書きする
+# 状態の並び：[x, y, z, roll, pitch, yaw, v, omega]（base_frame_id の姿勢と速度）
+# 取付 base -> LiDAR は TF（静的）から読む
+/**:
+    ros__parameters:
+      ekf_model: "ndt_odom"                # "ndt_only"：NDT のみ / "ndt_odom"：NDT ＋ オドメトリ観測
+      predict_rate: 50.0                   # 予測して /ekf_pose・/ekf_odom・TF を配信する周期 [Hz]
+      history_length: 1.0                  # 巻き戻しのために観測を保持する長さ [s]（NDT の遅れより長く）
+      publish_tf: true                     # map -> base_frame_id の TF を配信するか
+      map_frame_id: "map"
+      base_frame_id: "base_link"
+      lidar_frame_id: "velodyne"           # 点群のフレーム（NDT が推定する姿勢のフレーム）
+      max_predict_dt: 0.2                  # 1 回の予測で進める dt の上限 [s]
+
+      # プロセスノイズ（スペクトル密度）[x, y, z, roll, pitch, yaw, v, omega]
+      # [m^2/s], [rad^2/s], [m^2/s^3], [rad^2/s^3]
+      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 0.1]
+      # NDT 観測ノイズ（分散、LiDAR 座標）[x, y, z, roll, pitch, yaw] [m^2], [rad^2]
+      R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3]
+      # オドメトリ観測ノイズ（分散）[v, omega] [m^2/s^2], [rad^2/s^2]
+      R_odom: [2.5e-3, 5.0e-3]
+      # 初期共分散（分散、base）[x, y, z, roll, pitch, yaw, v, omega]
+      P_init: [2.0e-2, 2.0e-2, 2.0e-2, 0.06, 0.06, 2.0e-3, 1.0, 1.0]
+
+      gate_horizontal: 11.34               # NDT の [x, y, yaw] のゲート（chi2(3, 0.99)）
+      gate_1d: 6.63                        # NDT の z, roll, pitch それぞれのゲート（chi2(1, 0.99)）
+      lockout_count: 10                    # z, roll, pitch がこの回数連続で棄却されたら観測値で再初期化（0 以下で無効）
+
+      odom_covariance_source: "param"      # R_odom の出どころ："param"（上の R_odom）/ "message"（twist.covariance）
+      gate_odom: 9.21                      # オドメトリのゲート（chi2(2, 0.99)）
+      odom_timeout_init: 0.2               # 初期化時、この秒数以内のオドメトリがあれば v, omega をその値にする [s]
