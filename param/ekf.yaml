@@ -14,7 +14,7 @@
 
       # プロセスノイズ（スペクトル密度）[x, y, z, roll, pitch, yaw, v, omega]
       # [m^2/s], [rad^2/s], [m^2/s^3], [rad^2/s^3]
-      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 0.1]
+      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 1.0]
       # NDT 観測ノイズ（分散、LiDAR 座標）[x, y, z, roll, pitch, yaw] [m^2], [rad^2]
       R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3]
       # オドメトリ観測ノイズ（分散）[v, omega] [m^2/s^2], [rad^2/s^2]
@@ -27,5 +27,5 @@
       lockout_count: 10                    # z, roll, pitch がこの回数連続で棄却されたら観測値で再初期化（0 以下で無効）
 
       odom_covariance_source: "param"      # R_odom の出どころ："param"（上の R_odom）/ "message"（twist.covariance）
-      gate_odom: 9.21                      # オドメトリのゲート（chi2(2, 0.99)）
+      gate_odom: 1.0e9                      # オドメトリのゲート（chi2(2, 0.99)）
       odom_timeout_init: 0.2               # 初期化時、この秒数以内のオドメトリがあれば v, omega をその値にする [s]
