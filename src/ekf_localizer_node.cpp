@@ -168,7 +168,9 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
   // twist は child_frame_id（base）座標なので linear.x, angular.z がそのまま v, omega
   const double v = msg->twist.twist.linear.x;
   const double omega = msg->twist.twist.angular.z;
-  const double stamp = rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds();
+  // twist が表す動きは stamp より odom_delay だけ前のもの（diff_drive_controller の移動平均など）
+  const double stamp =
+    rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds() - cfg_.odom_delay;
   const LaggedEkf::OdomResult res = filter_->addOdom(v, omega, r, stamp);
 
   if (res.status == Status::kTooOld) {
@@ -178,6 +180,16 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
     RCLCPP_WARN(
       get_logger(), "Odometry v=%.3f omega=%.3f rejected by gate (d2 = %lf, %d times in a row).",
       v, omega, res.d2, res.reject_count);
+  }
+
+  // 推定した s_omega（滑りの割合）は、変わったときだけ出す
+  if (cfg_.odom_params.omega_scale_var <= 0.0 || !filter_->initialized()) {return;}
+  const double scale = filter_->current().omegaScale();
+  if (std::abs(scale - last_logged_scale_) > 0.01) {
+    last_logged_scale_ = scale;
+    RCLCPP_INFO(
+      get_logger(), "Odometry omega scale: %.3f (odometry omega / true omega, sd %.3f).", scale,
+      std::sqrt(filter_->current().covariance()(VehicleEkf::kOmegaScale, VehicleEkf::kOmegaScale)));
   }
 }
 

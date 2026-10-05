@@ -29,9 +29,9 @@ VehicleEkf::Params params()
 {
   VehicleEkf::Params p;
   p.o_x = -0.17; p.o_z = 1.2; p.yaw_o = -0.017;
-  p.q << 5e-2, 5e-2, 5e-3, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
+  p.q << 5e-2, 5e-2, 5e-3, 5e-2, 5e-2, 5e-2, 0.05, 0.1, 0.0;
   p.r_ndt << 1e-2, 1e-2, 1e-2, 0.03, 0.03, 1e-3;
-  p.p_init << 2e-2, 2e-2, 2e-2, 0.06, 0.06, 2e-3, 1.0, 1.0;
+  p.p_init << 2e-2, 2e-2, 2e-2, 0.06, 0.06, 2e-3, 1.0, 1.0, 0.0;
   return p;
 }
 
@@ -219,7 +219,7 @@ TEST(LaggedEkf, TooOldMeasurementIsDropped)
   // 履歴は最新から 0.5 s ぶん（50 Hz ＋ 10 Hz）程度に収まっている
   EXPECT_LE(lagged.historySize(), 33u);
 
-  const VehicleEkf::Vector8d x_before = lagged.current().state();
+  const VehicleEkf::StateVector x_before = lagged.current().state();
   const auto r = lagged.addNdt(ms.back().z, kT0 + 1.0);   // 1 s 前（履歴の外）
   EXPECT_EQ(r.status, Status::kTooOld);
   const auto o = lagged.addOdom(kV, kOmega, kROdom, kT0 + 1.0);
@@ -231,7 +231,7 @@ TEST(LaggedEkf, PredictedDoesNotChangeCurrent)
 {
   LaggedEkf lagged(makeOdomEkf(), 1.0);
   runLagged(lagged, scenario(0.0, 1.0));
-  const VehicleEkf::Vector8d x = lagged.current().state();
+  const VehicleEkf::StateVector x = lagged.current().state();
   const double t = lagged.current().lastStamp();
 
   const auto pred = lagged.predicted(t + 0.05);

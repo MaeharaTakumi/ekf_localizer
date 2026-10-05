@@ -1,11 +1,16 @@
 # ekf_localizer
 
 NDT の位置推定（[lidar_localization](https://github.com/MaeharaTakumi/lidar_localization) の `/ndt_pose`）と
-車輪オドメトリを融合する 8 状態 EKF です。
+車輪オドメトリを融合する 9 状態 EKF です。
 環境ごとの起動は [localization_bringup](https://github.com/MaeharaTakumi/localization_bringup) を使います。
 
-- 状態：`[x, y, z, roll, pitch, yaw, v, omega]`（`base_frame_id` の姿勢と、前進速度・ヨー角速度）
-- 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v, omega]`
+- 状態：`[x, y, z, roll, pitch, yaw, v, omega, s_omega]`（`base_frame_id` の姿勢と、前進速度・ヨー角速度、
+  オドメトリの omega のスケール）
+- 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v, s_omega · omega]`
+- **オドメトリの滑り**：その場旋回などでは車輪が滑り、オドメトリの omega が真値より一定の割合で大きくなります
+  （Gazebo で約 1.09 倍）。その割合 `s_omega` を NDT の yaw の変化から推定します（旋回中だけ更新）。
+- **オドメトリの遅れ**：`odom_delay` 秒だけ stamp を戻して入れます（Gazebo の diff_drive_controller は
+  twist を 0.2 s の移動平均で出すので 0.09 s。`localization_bringup` の `gazebo.yaml` で設定）。
 - **巻き戻し（ルックバック）**：NDT の解は点群の取得時刻の観測として、遅れて届きます。
   NDT が届いたら取得時刻の直前の状態に戻し、それ以降のオドメトリを適用し直します（`LaggedEkf`）。
 - **観測は届いた時点で更新**し、**予測は `predict_rate` の周期**で現在時刻まで行って配信します。
@@ -30,6 +35,8 @@ NDT の位置推定（[lidar_localization](https://github.com/MaeharaTakumi/lida
 | `ekf_model` | `ndt_odom` | `ndt_only`：NDT のみ / `ndt_odom`：NDT ＋ オドメトリ |
 | `predict_rate` | 50.0 | 予測して配信する周期 [Hz] |
 | `history_length` | 1.0 | 巻き戻しのために保持する長さ [s]。NDT の遅れ（計算時間＋通信）より長くする |
+| `odom_delay` | 0.0 | オドメトリの遅れ [s]。stamp から引く |
+| `omega_scale_var` | 0.01 | `s_omega` の初期分散。0 なら推定しない（`s_omega` = 1） |
 | `base_frame_id` / `lidar_frame_id` | `base_link` / `velodyne` | 状態の基準フレームと点群のフレーム |
 
 ## テスト

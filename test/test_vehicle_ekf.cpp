@@ -16,8 +16,8 @@
 using ekf_localizer::normalizeAngle;
 using ekf_localizer::VehicleEkf;
 using ekf_localizer::VehicleOdomEkf;
-using V8 = VehicleEkf::Vector8d;
-using M8 = VehicleEkf::Matrix8d;
+using VS = VehicleEkf::StateVector;
+using MS = VehicleEkf::StateMatrix;
 using V6 = VehicleEkf::Vector6d;
 using SR = VehicleEkf::ScalarResult;
 
@@ -28,9 +28,9 @@ VehicleEkf::Params P0()
 {
   VehicleEkf::Params p;
   p.o_x = -0.2; p.o_y = 0.05; p.o_z = 1.2; p.yaw_o = -0.034; p.roll_o = 0.01; p.pitch_o = 0.02;
-  p.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
+  p.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.1, 0.0;
   p.r_ndt << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 5e-3;
-  p.p_init << 2 * p.r_ndt, 1.0, 1.0;
+  p.p_init << 2 * p.r_ndt, 1.0, 1.0, 0.0;
   return p;
 }
 
@@ -124,7 +124,7 @@ struct SimConfig
 
 struct Sample
 {
-  double t, err_pos, v_est, w_est, v_true, w_true;
+  double t, err_pos, v_est, w_est, v_true, w_true, err_yaw;
 };
 
 struct SimResult
@@ -183,7 +183,8 @@ SimResult simulate(VehicleEkf & ekf, VehicleOdomEkf * odom_ekf, const SimConfig 
     res.psd_always &= psdOK(ekf.covariance());
     const auto b = ekf.basePose().translation();
     res.samples.push_back(
-      {tr, std::hypot(b.x() - s.x, b.y() - s.y), ekf.velocity(), ekf.angularVelocity(), s.v, s.w});
+      {tr, std::hypot(b.x() - s.x, b.y() - s.y), ekf.velocity(), ekf.angularVelocity(), s.v, s.w,
+        normalizeAngle(ekf.state()(VehicleEkf::kYaw) - s.psi)});
   }
   return res;
 }
@@ -222,29 +223,29 @@ VehicleOdomEkf makeOdomEkf(const VehicleEkf::Params & p = P0())
 TEST(VehicleEkf, ArcIntegrationIsExact)
 {
   using E = VehicleEkf;
-  V8 x = V8::Zero();
+  VS x = VS::Zero();
   x(E::kX) = 1.0; x(E::kY) = 2.0; x(E::kYaw) = 0.3; x(E::kV) = 1.2; x(E::kOmega) = 0.8;
   for (double dt : {0.05, 0.2, 1.0, 3.0}) {
-    const V8 xn = VehicleEkf::propagate(x, dt);
+    const VS xn = VehicleEkf::propagate(x, dt);
     const double R = x(E::kV) / x(E::kOmega);
     const double ex = x(E::kX) + R * (std::sin(x(E::kYaw) + x(E::kOmega) * dt) - std::sin(x(E::kYaw)));
     const double ey = x(E::kY) - R * (std::cos(x(E::kYaw) + x(E::kOmega) * dt) - std::cos(x(E::kYaw)));
     EXPECT_LT(std::hypot(xn(E::kX) - ex, xn(E::kY) - ey), 1e-12) << "dt=" << dt;
     EXPECT_DOUBLE_EQ(xn(E::kZ), x(E::kZ)) << "pitch = 0 なら z は動かない";
   }
-  V8 a = V8::Zero();
+  VS a = VS::Zero();
   a(E::kYaw) = 0.3; a(E::kV) = 1.0; a(E::kOmega) = 1e-9;
-  V8 b = a;
+  VS b = a;
   b(E::kOmega) = 0.0;
   EXPECT_LT((VehicleEkf::propagate(a, 0.1) - VehicleEkf::propagate(b, 0.1)).head<2>().norm(), 1e-9)
     << "omega → 0 で直線に連続（分岐なし）";
 
   // 傾斜：水平速度は v cos(pitch)、z は -v sin(pitch)（上り坂は pitch < 0）
-  V8 c = x;
+  VS c = x;
   const double th = -std::atan(1.0 / 12.0);
   c(E::kPitch) = th;
   const double dt = 0.5;
-  const V8 cn = VehicleEkf::propagate(c, dt), xn = VehicleEkf::propagate(x, dt);
+  const VS cn = VehicleEkf::propagate(c, dt), xn = VehicleEkf::propagate(x, dt);
   const double flat = std::hypot(xn(E::kX) - x(E::kX), xn(E::kY) - x(E::kY));
   EXPECT_NEAR(std::hypot(cn(E::kX) - c(E::kX), cn(E::kY) - c(E::kY)), flat * std::cos(th), 1e-12);
   EXPECT_NEAR(cn(E::kZ) - c(E::kZ), -c(E::kV) * std::sin(th) * dt, 1e-12);
@@ -255,18 +256,18 @@ TEST(VehicleEkf, TransitionJacobianMatchesNumerical)
 {
   for (double w : {0.8, 1e-5, 0.0, -1.3}) {
     for (double th : {0.0, 0.2, -0.08}) {
-      V8 x;
-      x << 1.0, -2.0, 0.5, 0.05, th, 2.9, 0.9, w;
+      VS x;
+      x << 1.0, -2.0, 0.5, 0.05, th, 2.9, 0.9, w, 1.1;
       const double dt = 0.15, h = 1e-6;
-      M8 Fn;
-      for (int j = 0; j < 8; ++j) {
-        V8 xp = x, xm = x;
+      MS Fn;
+      for (int j = 0; j < VehicleEkf::kN; ++j) {
+        VS xp = x, xm = x;
         xp(j) += h; xm(j) -= h;
-        V8 d = VehicleEkf::propagate(xp, dt) - VehicleEkf::propagate(xm, dt);
+        VS d = VehicleEkf::propagate(xp, dt) - VehicleEkf::propagate(xm, dt);
         d(VehicleEkf::kYaw) = normalizeAngle(d(VehicleEkf::kYaw));
         Fn.col(j) = d / (2 * h);
       }
-      const M8 Fa = VehicleEkf::transitionJacobian(x, dt);
+      const MS Fa = VehicleEkf::transitionJacobian(x, dt);
       EXPECT_LT((Fa - Fn).cwiseAbs().maxCoeff(), 1e-6) << "omega=" << w << " pitch=" << th;
     }
   }
@@ -278,8 +279,8 @@ TEST(VehicleEkf, ObservationJacobianMatchesAnalytic)
   const auto p = P0();
   VehicleEkf ekf;
   ekf.setParams(p);
-  V8 x;
-  x << 1.0, -2.0, 0.3, 0.07, -0.12, 2.9, 0.9, 0.3;
+  VS x;
+  x << 1.0, -2.0, 0.3, 0.07, -0.12, 2.9, 0.9, 0.3, 1.1;
   const auto H = ekf.observationJacobian(x);
   const double r = x(3), pt = x(4), y = x(5);
   const Eigen::Vector3d o(p.o_x, p.o_y, p.o_z);
@@ -296,10 +297,10 @@ TEST(VehicleEkf, ObservationJacobianMatchesAnalytic)
   EXPECT_LT(((H.block<3, 3>(0, 0)) - Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff(), 1e-8);
   EXPECT_LT(((H.block<3, 3>(0, 3)) - Hp).cwiseAbs().maxCoeff(), 1e-8);
   EXPECT_LT((H.block<3, 3>(3, 0).cwiseAbs().maxCoeff()), 1e-8) << "姿勢は位置に依存しない";
-  EXPECT_LT(H.rightCols<2>().cwiseAbs().maxCoeff(), 1e-12) << "v, omega に依存しない";
+  EXPECT_LT(H.rightCols<3>().cwiseAbs().maxCoeff(), 1e-12) << "v, omega, s_omega に依存しない";
 
   // 水平面（roll = pitch = 0）では旧 5 状態モデルの H と一致する
-  V8 xf = x;
+  VS xf = x;
   xf(3) = 0.0; xf(4) = 0.0;
   const auto Hf = ekf.observationJacobian(xf);
   const double c = std::cos(y), s = std::sin(y);
@@ -442,7 +443,7 @@ TEST(VehicleEkf, InitializeRoundTrip)
     << "状態は base_link の姿勢";
   EXPECT_TRUE(psdOK(ekf.covariance()));
   // 初期共分散は P_init の対角
-  EXPECT_LT((ekf.covariance() - M8(p.p_init.asDiagonal())).cwiseAbs().maxCoeff(), 1e-15);
+  EXPECT_LT((ekf.covariance() - MS(p.p_init.asDiagonal())).cwiseAbs().maxCoeff(), 1e-15);
 }
 
 // ---------------------------------------------------------------------------
@@ -544,9 +545,13 @@ TEST(VehicleEkf, SlopeZFollowsDuringNdtOutage)
 
 TEST(VehicleOdomEkf, UpdateMatchesGenericKalmanWithH)
 {
-  // updateOdom の近道（H = [0|I2] を使った S, K）が一般形の EKF 更新と一致するか
+  // updateOdom が一般形の EKF 更新（h = [v, s_omega · omega]、H はその線形化）と一致するか
   const auto p = P0();
   VehicleOdomEkf ekf = makeOdomEkf(p);
+  VehicleOdomEkf::OdomParams op;
+  op.omega_scale_q = 1e-4;
+  op.omega_scale_var = 0.01;
+  ekf.setOdomParams(op);
   ekf.initialize(lidarObs(p, 1.0, 2.0, 0.4), 10.0);
   // 非対角が埋まった P を作る
   double t = 10.0;
@@ -554,26 +559,34 @@ TEST(VehicleOdomEkf, UpdateMatchesGenericKalmanWithH)
     t += 0.05;
     ekf.predictTo(t);
     ekf.update(lidarObs(p, 1.0 + 0.05 * k, 2.0, 0.4));
+    // omega_scale_min_rate（0.3 rad/s）以上で旋回させ、omega と s_omega を相関させる
+    ekf.updateOdom(1.0, 1.0, Eigen::Vector2d(2.5e-3, 5.0e-3), t);
   }
-  const V8 x0 = ekf.state();
-  const M8 P = ekf.covariance();
-  const Eigen::Vector2d z(0.9, 0.1), r(2.5e-3, 5.0e-3);
+  const VS x0 = ekf.state();
+  const MS P = ekf.covariance();
+  ASSERT_GT(std::abs(P(VehicleEkf::kOmega, VehicleEkf::kOmegaScale)), 1e-8);
+  ASSERT_GT(std::abs(x0(VehicleEkf::kOmega)), ekf.odomParams().omega_scale_min_rate);
+  const Eigen::Vector2d z(0.9, 1.1), r(2.5e-3, 5.0e-3);
 
-  Eigen::Matrix<double, 2, 8> H = Eigen::Matrix<double, 2, 8>::Zero();
+  constexpr int N = VehicleEkf::kN;
+  const double s = x0(VehicleEkf::kOmegaScale);
+  Eigen::Matrix<double, 2, N> H = Eigen::Matrix<double, 2, N>::Zero();
   H(0, VehicleEkf::kV) = 1.0;
-  H(1, VehicleEkf::kOmega) = 1.0;
+  H(1, VehicleEkf::kOmega) = s;
+  H(1, VehicleEkf::kOmegaScale) = x0(VehicleEkf::kOmega);
+  const Eigen::Vector2d y = z - Eigen::Vector2d(x0(VehicleEkf::kV), s * x0(VehicleEkf::kOmega));
   const Eigen::Matrix2d R = r.asDiagonal();
   const Eigen::Matrix2d S = H * P * H.transpose() + R;
-  const Eigen::Matrix<double, 8, 2> K = P * H.transpose() * S.inverse();
-  V8 x_exp = x0 + K * (z - H * x0);
+  const Eigen::Matrix<double, N, 2> K = P * H.transpose() * S.inverse();
+  VS x_exp = x0 + K * y;
   for (int i = VehicleEkf::kRoll; i <= VehicleEkf::kYaw; ++i) {x_exp(i) = normalizeAngle(x_exp(i));}
-  const M8 IKH = M8::Identity() - K * H;
-  const M8 P_exp = IKH * P * IKH.transpose() + K * R * K.transpose();
+  const MS IKH = MS::Identity() - K * H;
+  const MS P_exp = IKH * P * IKH.transpose() + K * R * K.transpose();
 
   ASSERT_TRUE(ekf.updateOdom(z(0), z(1), r, t));   // 同時刻なので予測は入らない
   EXPECT_LT((ekf.state() - x_exp).cwiseAbs().maxCoeff(), 1e-12);
   EXPECT_LT((ekf.covariance() - P_exp).cwiseAbs().maxCoeff(), 1e-12);
-  EXPECT_NEAR(ekf.lastOdomMahalanobis(), (z - H * x0).dot(S.inverse() * (z - H * x0)), 1e-9);
+  EXPECT_NEAR(ekf.lastOdomMahalanobis(), y.dot(S.inverse() * y), 1e-9);
 }
 
 TEST(VehicleOdomEkf, LowerVelocityNoiseThanNdtOnly)
@@ -649,8 +662,8 @@ TEST(VehicleOdomEkf, SingleOutlierRejected)
   cfg.duration = 10.0;
   VehicleOdomEkf ekf = makeOdomEkf();
   simulate(ekf, &ekf, cfg);
-  const V8 x_before = ekf.state();
-  const M8 P_before = ekf.covariance();
+  const VS x_before = ekf.state();
+  const MS P_before = ekf.covariance();
   // 直前の予測と同時刻に入れるので、予測は入らず更新の有無だけが見える
   const double t_end = 1000.0 + static_cast<int>(cfg.duration / 0.025) * 0.025;
   EXPECT_FALSE(ekf.updateOdom(3.0, 0.0, Eigen::Vector2d(2.5e-3, 5.0e-3), t_end));
@@ -732,4 +745,118 @@ TEST(VehicleOdomEkf, InitializesVelocityFromRecentOdom)
   recent.initialize(lidarObs(p, 0, 0, 0), 105.05);
   EXPECT_TRUE(recent.initializedFromOdom());
   EXPECT_DOUBLE_EQ(recent.velocity(), 0.5);
+}
+
+// ---------------------------------------------------------------------------
+// オドメトリの omega のスケール s_omega の推定
+// ---------------------------------------------------------------------------
+namespace
+{
+
+VehicleOdomEkf::OdomParams scaleEstimation()
+{
+  VehicleOdomEkf::OdomParams op;
+  op.gate_odom = 1e9;
+  op.omega_scale_q = 1e-4;
+  op.omega_scale_var = 0.01;
+  return op;
+}
+
+/// その場旋回を 6 s ごとに反転する。オドメトリの omega は真値の 1.1 倍（車輪の滑り）
+SimConfig spinWithSlip()
+{
+  SimConfig cfg;
+  cfg.duration = 24.0;
+  cfg.motion = [](double t, double & v, double & w) {
+      v = 0.0;
+      w = (static_cast<int>(t / 6.0) % 2 == 0) ? 1.0 : -1.0;
+    };
+  cfg.odom_corrupt = [](double, double &, double & w) {w *= 1.1;};
+  cfg.ndt_yaw_sigma = 0.02;
+  return cfg;
+}
+
+}  // namespace
+
+TEST(VehicleOdomEkf, EstimatesOmegaScaleUnderSlip)
+{
+  // 滑りを白色ノイズとして扱うと、yaw の Q が小さいときにオドメトリに引っ張られて yaw がずれ続ける。
+  // s_omega を推定すると、yaw の Q を小さくしても NDT に合ったまま
+  // 旋回の反転は omega の段差なので、param/ekf.yaml と同じく Q の omega を大きく・オドメトリのゲートを無効にする
+  auto p = P0();
+  p.q(VehicleEkf::kYaw) = 1e-3;
+  p.q(VehicleEkf::kOmega) = 1.0;
+  p.r_ndt(5) = 4e-4;
+  const SimConfig cfg = spinWithSlip();
+  const auto yaw_err = [](const Sample & s) {return s.err_yaw;};
+
+  VehicleOdomEkf fixed = makeOdomEkf(p);
+  VehicleOdomEkf::OdomParams op_fixed;
+  op_fixed.gate_odom = 1e9;
+  fixed.setOdomParams(op_fixed);
+  const auto r0 = simulate(fixed, &fixed, cfg);
+  VehicleOdomEkf est = makeOdomEkf(p);
+  est.setOdomParams(scaleEstimation());
+  const auto r1 = simulate(est, &est, cfg);
+
+  const double e0 = rmsOver(r0, 4, 24, yaw_err), e1 = rmsOver(r1, 4, 24, yaw_err);
+  std::printf(
+    "  滑り 10%%: yaw rms 推定なし %.2f deg  推定あり %.2f deg  s_omega %.3f\n",
+    e0 * 180 / M_PI, e1 * 180 / M_PI, est.omegaScale());
+  EXPECT_NEAR(fixed.omegaScale(), 1.0, 1e-12) << "推定しない設定では 1 のまま";
+  EXPECT_NEAR(est.omegaScale(), 1.1, 0.02);
+  EXPECT_LT(e1, 0.75 * e0);
+  EXPECT_TRUE(r1.psd_always);
+}
+
+TEST(VehicleOdomEkf, OmegaScaleStaysWhileGoingStraight)
+{
+  // 旋回しないと s_omega は観測できないので、初期値 1 から動かない
+  SimConfig cfg;
+  cfg.motion = [](double, double & v, double & w) {v = 1.0; w = 0.0;};
+  VehicleOdomEkf ekf = makeOdomEkf();
+  ekf.setOdomParams(scaleEstimation());
+  const auto r = simulate(ekf, &ekf, cfg);
+  EXPECT_NEAR(ekf.omegaScale(), 1.0, 0.03);
+  EXPECT_TRUE(r.psd_always);
+
+  // omega_scale_min_rate を 0 にすると、オドメトリのノイズだけで s_omega が下限まで流れる
+  VehicleOdomEkf drift = makeOdomEkf();
+  auto op = scaleEstimation();
+  op.omega_scale_min_rate = 0.0;
+  drift.setOdomParams(op);
+  simulate(drift, &drift, cfg);
+  std::printf(
+    "  直進 20 s 後の s_omega: min_rate 0.3 → %.3f,  0 → %.3f\n", ekf.omegaScale(),
+    drift.omegaScale());
+  EXPECT_LT(drift.omegaScale(), 0.95);
+}
+
+TEST(VehicleOdomEkf, OmegaScaleIsClampedToLimits)
+{
+  // omega の符号が逆のオドメトリでも、s_omega は範囲の下限で止まる
+  SimConfig cfg = spinWithSlip();
+  cfg.odom_corrupt = [](double, double &, double & w) {w = -w;};
+  VehicleOdomEkf ekf = makeOdomEkf();
+  auto op = scaleEstimation();
+  op.omega_scale_min = 0.8;
+  op.omega_scale_max = 1.25;
+  ekf.setOdomParams(op);
+  const auto r = simulate(ekf, &ekf, cfg);
+  EXPECT_GE(ekf.omegaScale(), 0.8);
+  EXPECT_LE(ekf.omegaScale(), 1.25);
+  EXPECT_TRUE(r.psd_always);
+}
+
+TEST(VehicleOdomEkf, OmegaScaleParamsSurviveSetParams)
+{
+  // setOdomParams() の後に setParams() を呼んでも s_omega の q, p_init は odom_params の値
+  VehicleOdomEkf ekf;
+  ekf.setOdomParams(scaleEstimation());
+  ekf.setParams(P0());
+  EXPECT_DOUBLE_EQ(ekf.params().q(VehicleEkf::kOmegaScale), 1e-4);
+  EXPECT_DOUBLE_EQ(ekf.params().p_init(VehicleEkf::kOmegaScale), 0.01);
+  ekf.initialize(lidarObs(P0(), 0, 0, 0), 0.0);
+  EXPECT_DOUBLE_EQ(ekf.omegaScale(), 1.0);
+  EXPECT_DOUBLE_EQ(ekf.covariance()(VehicleEkf::kOmegaScale, VehicleEkf::kOmegaScale), 0.01);
 }

@@ -1,5 +1,6 @@
 # EKF のパラメータ（共通）。環境ごとの値（フレーム名など）は localization_bringup の param/env/*.yaml で上書きする
-# 状態の並び：[x, y, z, roll, pitch, yaw, v, omega]（base_frame_id の姿勢と速度）
+# 状態の並び：[x, y, z, roll, pitch, yaw, v, omega, s_omega]（base_frame_id の姿勢と速度、オドメトリの omega のスケール）
+# Q と P_init は先頭 8 状態の分。s_omega の分は omega_scale_q / omega_scale_var で与える
 # 取付 base -> LiDAR は TF（静的）から読む
 /**:
     ros__parameters:
@@ -29,3 +30,11 @@
       odom_covariance_source: "param"      # R_odom の出どころ："param"（上の R_odom）/ "message"（twist.covariance）
       gate_odom: 1.0e9                      # オドメトリのゲート（chi2(2, 0.99)）
       odom_timeout_init: 0.2               # 初期化時、この秒数以内のオドメトリがあれば v, omega をその値にする [s]
+      odom_delay: 0.0                      # オドメトリの遅れ [s]。stamp から引いて補う（環境ファイルで設定。Gazebo は 0.09）
+
+      # オドメトリの omega のスケール s_omega（オドメトリの omega / 真の omega。車輪の滑り）の推定
+      # その場旋回では車輪が滑り、オドメトリの omega が真値より一定の割合で大きくなる（Gazebo で約 1.09 倍）
+      omega_scale_q: 1.0e-4                # s_omega のプロセスノイズ [1/s]
+      omega_scale_var: 1.0e-2              # s_omega の初期分散（sd 0.1）。0 なら推定しない（s_omega = 1）
+      omega_scale_limits: [0.8, 1.25]      # s_omega の範囲
+      omega_scale_min_rate: 0.3            # |omega| がこれ未満 [rad/s] のオドメトリでは s_omega を更新しない

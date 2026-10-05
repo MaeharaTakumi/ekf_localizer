@@ -31,6 +31,8 @@ struct EkfConfig
   std::string lidar_frame_id{"velodyne"};
   /// オドメトリ観測ノイズの出どころ："param"（R_odom）or "message"（twist.covariance）
   std::string odom_covariance_source{"param"};
+  /// オドメトリの遅れ [s]。twist が実際の動きより遅れる分（移動平均など）を、stamp から引いて補う
+  double odom_delay{0.0};
 
   /// 取付（o_x〜yaw_o）は TF から読んで createEkf() で入れる
   VehicleEkf::Params params;

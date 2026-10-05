@@ -49,7 +49,7 @@ Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw)
 }
 
 /// 状態の角度成分（roll, pitch, yaw）を wrap する
-void wrapStateAngles(VehicleEkf::Vector8d & x)
+void wrapStateAngles(VehicleEkf::StateVector & x)
 {
   x(VehicleEkf::kRoll) = normalizeAngle(x(VehicleEkf::kRoll));
   x(VehicleEkf::kPitch) = normalizeAngle(x(VehicleEkf::kPitch));
@@ -65,7 +65,7 @@ bool isAngleObs(int i) {return i >= 3;}
 // モデル
 // ---------------------------------------------------------------------------
 
-Eigen::Affine3d VehicleEkf::poseFromState(const Vector8d & x)
+Eigen::Affine3d VehicleEkf::poseFromState(const StateVector & x)
 {
   Eigen::Affine3d T = Eigen::Affine3d::Identity();
   T.linear() = rotationFromRpy(x(kRoll), x(kPitch), x(kYaw));
@@ -73,7 +73,7 @@ Eigen::Affine3d VehicleEkf::poseFromState(const Vector8d & x)
   return T;
 }
 
-VehicleEkf::Vector8d VehicleEkf::propagate(const Vector8d & x, double dt)
+VehicleEkf::StateVector VehicleEkf::propagate(const StateVector & x, double dt)
 {
   // 車体 x 軸方向の速度 v を map に回すと (v cos(pitch) [cos yaw, sin yaw], -v sin(pitch))。
   // 水平は円弧の厳密積分を半角公式で書いた形（pitch は区間内一定）：
@@ -88,17 +88,17 @@ VehicleEkf::Vector8d VehicleEkf::propagate(const Vector8d & x, double dt)
   const double ct = std::cos(x(kPitch));
   const double st = std::sin(x(kPitch));
 
-  Vector8d xn = x;
+  StateVector xn = x;
   xn(kX) += v * ct * dt * k * std::cos(beta);
   xn(kY) += v * ct * dt * k * std::sin(beta);
   xn(kZ) -= v * st * dt;   // ZYX ではピッチ正が機首下げ。上り坂は pitch < 0 で z が増える
   // yaw の変化率は本来 omega cos(roll)/cos(pitch) だが omega で近似する（1/12 勾配で 0.35%）
   xn(kYaw) = normalizeAngle(x(kYaw) + omega * dt);
-  // roll, pitch, v, omega はランダムウォーク
+  // roll, pitch, v, omega, s_omega はランダムウォーク
   return xn;
 }
 
-VehicleEkf::Matrix8d VehicleEkf::transitionJacobian(const Vector8d & x, double dt)
+VehicleEkf::StateMatrix VehicleEkf::transitionJacobian(const StateVector & x, double dt)
 {
   const double v = x(kV);
   const double omega = x(kOmega);
@@ -112,7 +112,7 @@ VehicleEkf::Matrix8d VehicleEkf::transitionJacobian(const Vector8d & x, double d
   const double st = std::sin(x(kPitch));
   const double a = v * ct * dt;   // 水平方向の移動量（sinc 補正前）
 
-  Matrix8d F = Matrix8d::Identity();
+  StateMatrix F = StateMatrix::Identity();
   F(kX, kPitch) = -v * st * dt * k * cb;
   F(kY, kPitch) = -v * st * dt * k * sb;
   F(kX, kYaw) = -a * k * sb;
@@ -128,7 +128,7 @@ VehicleEkf::Matrix8d VehicleEkf::transitionJacobian(const Vector8d & x, double d
   return F;
 }
 
-VehicleEkf::Vector6d VehicleEkf::observe(const Vector8d & x) const
+VehicleEkf::Vector6d VehicleEkf::observe(const StateVector & x) const
 {
   // T_ML = T_MB · T_BL
   const Eigen::Affine3d T_ml = poseFromState(x) * mountTransform();
@@ -138,14 +138,14 @@ VehicleEkf::Vector6d VehicleEkf::observe(const Vector8d & x) const
   return h;
 }
 
-VehicleEkf::Matrix6x8d VehicleEkf::observationJacobian(const Vector8d & x) const
+VehicleEkf::Matrix6xN VehicleEkf::observationJacobian(const StateVector & x) const
 {
-  // RPY 抽出が取付回転を含むと解析式が長くなるので中心差分で求める。h は v, omega に依存しない
+  // RPY 抽出が取付回転を含むと解析式が長くなるので中心差分で求める。h は v, omega, s_omega に依存しない
   constexpr double kStep = 1.0e-6;
-  Matrix6x8d H = Matrix6x8d::Zero();
+  Matrix6xN H = Matrix6xN::Zero();
   for (int j = 0; j < 6; ++j) {
-    Vector8d xp = x;
-    Vector8d xm = x;
+    StateVector xp = x;
+    StateVector xm = x;
     xp(j) += kStep;
     xm(j) -= kStep;
     Vector6d d = observe(xp) - observe(xm);
@@ -170,6 +170,7 @@ void VehicleEkf::initialize(const Vector6d & z, double stamp)
   x_.setZero();
   x_.head<3>() = T_mb.translation();
   x_.segment<3>(kRoll) = rpyFromRotation(T_mb.linear());
+  x_(kOmegaScale) = 1.0;
 
   P_ = prm_.p_init.asDiagonal();
 
@@ -208,10 +209,10 @@ void VehicleEkf::predictTo(double stamp)
   if (last_dt_clamped_) {dt = prm_.max_predict_dt;}
   last_dt_ = dt;
 
-  const Matrix8d F = transitionJacobian(x_, dt);
+  const StateMatrix F = transitionJacobian(x_, dt);
   x_ = propagate(x_, dt);
 
-  P_ = F * P_ * F.transpose() + Matrix8d(prm_.q.asDiagonal()) * dt;
+  P_ = F * P_ * F.transpose() + StateMatrix(prm_.q.asDiagonal()) * dt;
 
   t_last_ = stamp;
 }
@@ -225,7 +226,7 @@ bool VehicleEkf::sequentialUpdate(
   const Vector6d & z, const int (&idx)[M], double gate, double & d2_out)
 {
   const Vector6d h = observe(x_);
-  const Matrix6x8d H_full = observationJacobian(x_);
+  const Matrix6xN H_full = observationJacobian(x_);
 
   Eigen::Matrix<double, M, 1> y;
   Eigen::Matrix<double, M, kN> H;
@@ -246,7 +247,7 @@ bool VehicleEkf::sequentialUpdate(
   const Eigen::Matrix<double, kN, M> K = P_ * H.transpose() * S_inv;
   x_ += K * y;
   wrapStateAngles(x_);
-  const Matrix8d IKH = Matrix8d::Identity() - K * H;
+  const StateMatrix IKH = StateMatrix::Identity() - K * H;
   P_ = IKH * P_ * IKH.transpose() + K * R * K.transpose();   // Joseph 形
   return true;
 }

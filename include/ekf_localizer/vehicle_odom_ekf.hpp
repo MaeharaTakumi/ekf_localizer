@@ -8,8 +8,12 @@ namespace ekf_localizer
 
 /// VehicleEkf にオドメトリの v, omega を**観測**として加えた EKF（docs/ekf_odom_plan.md）
 ///
-///   状態・運動モデル・NDT 観測は VehicleEkf と同じ。差分は次の 2 点だけ。
-///     観測 z_odom = [v, omega]、H = [0 | I2]（v, omega は状態の末尾。base_link 基準なのでレバーアームなし）
+///   状態・運動モデル・NDT 観測は VehicleEkf と同じ。差分は次の 3 点だけ。
+///     観測 z_odom = [v, s_omega · omega]（base_link 基準なのでレバーアームなし）
+///     スケール s_omega を推定する。その場旋回などで車輪が滑ると、オドメトリの omega は真の omega より
+///          一定の割合で大きく（小さく）なる。これを白色ノイズとして扱うと、50 Hz で入るオドメトリに
+///          引っ張られて yaw がずれ続け、NDT がゲートで棄却されて破綻する。s_omega は NDT の yaw の変化と
+///          オドメトリの omega の比として推定される（旋回していないときは動かない）
 ///     初期化 直前のオドメトリがあれば v, omega をその値から始める
 ///
 ///   ゲートで棄却したオドメトリは捨てる（再初期化しない）。
@@ -25,6 +29,16 @@ public:
     double gate_odom{9.21};
     /// NDT で初期化する時刻からこの秒数以内のオドメトリがあれば、v, omega をその値で初期化する
     double odom_timeout_init{0.2};
+    /// s_omega のプロセスノイズ（スペクトル密度）[1/s]。0 なら初期値から動かない
+    double omega_scale_q{0.0};
+    /// s_omega の初期分散。0 なら推定しない（s_omega = 1 のまま）
+    double omega_scale_var{0.0};
+    /// s_omega の範囲（更新後にこの範囲に収める）
+    double omega_scale_min{0.8};
+    double omega_scale_max{1.25};
+    /// |omega| がこれ未満 [rad/s] のオドメトリでは s_omega を更新しない。旋回していないときの
+    /// オドメトリはノイズしか持たず、積 s_omega · omega の推定では s_omega が 0 側へ引っ張られるため
+    double omega_scale_min_rate{0.3};
   };
 
   std::unique_ptr<VehicleEkf> clone() const override
@@ -32,7 +46,10 @@ public:
     return std::make_unique<VehicleOdomEkf>(*this);
   }
 
-  void setOdomParams(const OdomParams & p) {odom_prm_ = p;}
+  /// s_omega のプロセスノイズ・初期分散は odom_params の値で q, p_init の s_omega を上書きする
+  /// （setParams() と setOdomParams() はどちらの順に呼んでもよい）
+  void setParams(const Params & p) override;
+  void setOdomParams(const OdomParams & p);
   const OdomParams & odomParams() const {return odom_prm_;}
 
   /// オドメトリ観測。stamp まで予測してから更新する。
@@ -51,6 +68,9 @@ public:
   bool initializedFromOdom() const {return initialized_from_odom_;}
 
 private:
+  /// odom_prm_ の s_omega の設定を prm_ の q, p_init に入れる
+  void applyOmegaScaleParams();
+
   OdomParams odom_prm_;
   int odom_reject_count_{0};
   double last_odom_d2_{0.0};

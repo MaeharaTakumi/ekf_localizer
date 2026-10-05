@@ -44,6 +44,8 @@ private:
   std::unique_ptr<LaggedEkf> filter_;
   /// 最後に配信した時刻（同じ時刻で 2 回出さない）
   rclcpp::Time last_publish_stamp_;
+  /// 最後にログに出した s_omega
+  double last_logged_scale_{1.0};
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
