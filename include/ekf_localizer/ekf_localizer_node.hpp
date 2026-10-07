@@ -19,6 +19,7 @@ namespace ekf_localizer
 /// NDT とオドメトリを融合する EKF ノード
 ///
 ///   入力  ndt_pose（map → LiDAR、stamp は点群の取得時刻）、odom（v, omega）、initialpose（リセット）
+///         トピック名は ndt_pose_topic / odom_topic / initialpose_topic で変えられる
 ///   出力  ekf_pose（map → LiDAR）、ekf_odom（map → base、v, omega）、TF map → base
 ///
 ///   観測は届いた時点で LaggedEkf に入れる。NDT は遅れて届くので、点群の取得時刻まで巻き戻して
@@ -44,8 +45,6 @@ private:
   std::unique_ptr<LaggedEkf> filter_;
   /// 最後に配信した時刻（同じ時刻で 2 回出さない）
   rclcpp::Time last_publish_stamp_;
-  /// 最後にログに出した s_omega
-  double last_logged_scale_{1.0};
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

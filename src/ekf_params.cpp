@@ -9,7 +9,10 @@ namespace ekf_localizer
 
 void declareEkfParameters(rclcpp::Node & node)
 {
-  node.declare_parameter("ekf_model", "ndt_only");
+  node.declare_parameter("use_odom", false);
+  node.declare_parameter("ndt_pose_topic", "ndt_pose");
+  node.declare_parameter("odom_topic", "odom");
+  node.declare_parameter("initialpose_topic", "initialpose");
   node.declare_parameter("predict_rate", 50.0);
   node.declare_parameter("history_length", 1.0);
   node.declare_parameter("publish_tf", true);
@@ -27,17 +30,12 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("gate_1d", 6.63);
   node.declare_parameter("lockout_count", 10);
 
-  // オドメトリ観測（ekf_model: "ndt_odom" のみ）
+  // オドメトリ観測（use_odom: true のみ）
   node.declare_parameter("odom_covariance_source", "param");
   node.declare_parameter("R_odom", std::vector<double>{2.5e-3, 5.0e-3});
   node.declare_parameter("gate_odom", 9.21);
   node.declare_parameter("odom_timeout_init", 0.2);
   node.declare_parameter("odom_delay", 0.0);
-  // オドメトリの omega のスケール s_omega の推定（omega_scale_var が 0 なら推定しない）
-  node.declare_parameter("omega_scale_q", 0.0);
-  node.declare_parameter("omega_scale_var", 0.0);
-  node.declare_parameter("omega_scale_limits", std::vector<double>{0.8, 1.25});
-  node.declare_parameter("omega_scale_min_rate", 0.3);
 }
 
 EkfConfig loadEkfConfig(rclcpp::Node & node)
@@ -69,7 +67,10 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
       out = fallback;
     };
 
-  choose("ekf_model", cfg.model, {"ndt_only", "ndt_odom"});
+  node.get_parameter("use_odom", cfg.use_odom);
+  node.get_parameter("ndt_pose_topic", cfg.ndt_pose_topic);
+  node.get_parameter("odom_topic", cfg.odom_topic);
+  node.get_parameter("initialpose_topic", cfg.initialpose_topic);
   node.get_parameter("predict_rate", cfg.predict_rate);
   if (!(cfg.predict_rate > 0.0)) {
     RCLCPP_WARN(logger, "predict_rate must be positive (got %lf). Using 50.0.", cfg.predict_rate);
@@ -88,13 +89,12 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
 
   VehicleEkf::Params & prm = cfg.params;
   std::vector<double> q, p_init, r_ndt, r_odom;
-  // Q と P_init は [x, y, z, roll, pitch, yaw, v, omega] の 8 要素。
-  // 9 番目の状態 s_omega の分は omega_scale_q / omega_scale_var で与える（VehicleOdomEkf が入れる）
-  if (load("Q", 8, q)) {
-    prm.q.head<8>() = Eigen::Map<const Eigen::Matrix<double, 8, 1>>(q.data());
+  // Q と P_init は状態と同じ [x, y, z, roll, pitch, yaw, v, omega] の 8 要素
+  if (load("Q", VehicleEkf::kN, q)) {
+    prm.q = Eigen::Map<const VehicleEkf::StateVector>(q.data());
   }
-  if (load("P_init", 8, p_init)) {
-    prm.p_init.head<8>() = Eigen::Map<const Eigen::Matrix<double, 8, 1>>(p_init.data());
+  if (load("P_init", VehicleEkf::kN, p_init)) {
+    prm.p_init = Eigen::Map<const VehicleEkf::StateVector>(p_init.data());
   }
   if (load("R_ndt", 6, r_ndt)) {
     prm.r_ndt = Eigen::Map<const Eigen::Matrix<double, 6, 1>>(r_ndt.data());
@@ -116,27 +116,6 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
       logger, "odom_delay must be in [0, history_length) (got %lf). Using 0.0.", cfg.odom_delay);
     cfg.odom_delay = 0.0;
   }
-  node.get_parameter("omega_scale_q", oprm.omega_scale_q);
-  node.get_parameter("omega_scale_var", oprm.omega_scale_var);
-  if (!(oprm.omega_scale_q >= 0.0) || !(oprm.omega_scale_var >= 0.0)) {
-    RCLCPP_WARN(
-      logger, "omega_scale_q / omega_scale_var must be >= 0 (got %lf, %lf). Scale estimation disabled.",
-      oprm.omega_scale_q, oprm.omega_scale_var);
-    oprm.omega_scale_q = 0.0;
-    oprm.omega_scale_var = 0.0;
-  }
-  node.get_parameter("omega_scale_min_rate", oprm.omega_scale_min_rate);
-  std::vector<double> limits;
-  if (load("omega_scale_limits", 2, limits)) {
-    if (limits[0] > 0.0 && limits[0] <= 1.0 && limits[1] >= 1.0) {
-      oprm.omega_scale_min = limits[0];
-      oprm.omega_scale_max = limits[1];
-    } else {
-      RCLCPP_WARN(
-        logger, "omega_scale_limits must satisfy 0 < min <= 1 <= max (got [%lf, %lf]). Using default.",
-        limits[0], limits[1]);
-    }
-  }
 
   return cfg;
 }
@@ -145,9 +124,11 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
 {
   const VehicleEkf::Params & prm = cfg.params;
   RCLCPP_INFO(
-    logger, "ekf model: %s 9-state EKF [x,y,z,roll,pitch,yaw,v,omega,s_omega]%s",
-    cfg.base_frame_id.c_str(),
-    cfg.model == "ndt_odom" ? " + odom observation [v,s_omega*omega]" : " (odom unused)");
+    logger, "ekf model: %s 8-state EKF [x,y,z,roll,pitch,yaw,v,omega]%s",
+    cfg.base_frame_id.c_str(), cfg.use_odom ? " + odom observation [v,omega]" : " (odom unused)");
+  RCLCPP_INFO(
+    logger, "ekf topics: ndt_pose: %s, odom: %s, initialpose: %s",
+    cfg.ndt_pose_topic.c_str(), cfg.odom_topic.c_str(), cfg.initialpose_topic.c_str());
   RCLCPP_INFO(
     logger, "ekf frames: %s -> %s (lidar: %s), publish_tf: %d",
     cfg.map_frame_id.c_str(), cfg.base_frame_id.c_str(), cfg.lidar_frame_id.c_str(),
@@ -169,21 +150,13 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     logger, "ekf P_init(x,y,z,roll,pitch,yaw,v,omega): [%g, %g, %g, %g, %g, %g, %g, %g]",
     prm.p_init(0), prm.p_init(1), prm.p_init(2), prm.p_init(3), prm.p_init(4), prm.p_init(5),
     prm.p_init(6), prm.p_init(7));
-  if (cfg.model == "ndt_odom") {
+  if (cfg.use_odom) {
     const VehicleOdomEkf::OdomParams & oprm = cfg.odom_params;
     RCLCPP_INFO(
       logger, "ekf R_odom: [%g, %g] (source: %s), gate_odom: %lf, odom_timeout_init: %lf",
       oprm.r_odom(0), oprm.r_odom(1), cfg.odom_covariance_source.c_str(),
       oprm.gate_odom, oprm.odom_timeout_init);
     RCLCPP_INFO(logger, "ekf odom_delay: %lf s", cfg.odom_delay);
-    if (oprm.omega_scale_var > 0.0) {
-      RCLCPP_INFO(
-        logger, "ekf omega scale estimation: q %g, var %g, limits [%g, %g], min_rate %g rad/s",
-        oprm.omega_scale_q, oprm.omega_scale_var, oprm.omega_scale_min, oprm.omega_scale_max,
-        oprm.omega_scale_min_rate);
-    } else {
-      RCLCPP_INFO(logger, "ekf omega scale estimation: disabled");
-    }
   }
 }
 
@@ -200,14 +173,13 @@ std::unique_ptr<VehicleEkf> createEkf(const EkfConfig & cfg, const Eigen::Affine
   prm.yaw_o = std::atan2(R(1, 0), R(0, 0));
 
   std::unique_ptr<VehicleEkf> ekf;
-  if (cfg.model == "ndt_odom") {
+  if (cfg.use_odom) {
     auto odom_ekf = std::make_unique<VehicleOdomEkf>();
     odom_ekf->setOdomParams(cfg.odom_params);
     ekf = std::move(odom_ekf);
   } else {
     ekf = std::make_unique<VehicleEkf>();
   }
-  // VehicleOdomEkf では s_omega の q, p_init が odom_params の値で上書きされる
   ekf->setParams(prm);
   ekf->reset();
   return ekf;

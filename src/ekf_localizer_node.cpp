@@ -39,18 +39,18 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
 
   // NDT の解は 1 つも落としたくないので reliable
   ndt_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-    "ndt_pose", rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
+    cfg_.ndt_pose_topic, rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
     std::bind(&EkfLocalizer::ndtPoseReceived, this, std::placeholders::_1));
   // best effort は reliable / best effort どちらの publisher とも接続できる（Real と Gazebo で共通）。
   // 深さは処理が詰まったときに捨てない程度
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-    "odom", rclcpp::QoS(rclcpp::KeepLast(50)).best_effort(),
+    cfg_.odom_topic, rclcpp::QoS(rclcpp::KeepLast(50)).best_effort(),
     std::bind(&EkfLocalizer::odomReceived, this, std::placeholders::_1));
   initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-    "initialpose", rclcpp::SystemDefaultsQoS(),
+    cfg_.initialpose_topic, rclcpp::SystemDefaultsQoS(),
     std::bind(&EkfLocalizer::initialPoseReceived, this, std::placeholders::_1));
 
-  // /ekf_pose は以前の pcl_localization と同じ QoS・同じ中身（map → LiDAR）
+  // /ekf_pose は map → LiDAR。後から購読したノードも最後の値を受け取れるよう transient_local
   ekf_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "ekf_pose", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   ekf_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("ekf_odom", rclcpp::QoS(10));
@@ -180,16 +180,6 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
     RCLCPP_WARN(
       get_logger(), "Odometry v=%.3f omega=%.3f rejected by gate (d2 = %lf, %d times in a row).",
       v, omega, res.d2, res.reject_count);
-  }
-
-  // 推定した s_omega（滑りの割合）は、変わったときだけ出す
-  if (cfg_.odom_params.omega_scale_var <= 0.0 || !filter_->initialized()) {return;}
-  const double scale = filter_->current().omegaScale();
-  if (std::abs(scale - last_logged_scale_) > 0.01) {
-    last_logged_scale_ = scale;
-    RCLCPP_INFO(
-      get_logger(), "Odometry omega scale: %.3f (odometry omega / true omega, sd %.3f).", scale,
-      std::sqrt(filter_->current().covariance()(VehicleEkf::kOmegaScale, VehicleEkf::kOmegaScale)));
   }
 }
 

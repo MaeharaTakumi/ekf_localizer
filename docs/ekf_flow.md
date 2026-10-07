@@ -1,13 +1,12 @@
 # EKF の処理の流れ
 
 `ekf_localizer` が NDT の解とオドメトリから車両の姿勢を推定する流れです。
-ノード間のつながりは [localization_bringup/docs/node_graph.md](https://github.com/MaeharaTakumi/localization_bringup/blob/humble/docs/node_graph.md) を参照してください。
 
 ## 構成
 
 ```mermaid
 flowchart LR
-  odom["/wheelchair/odom"] --> cbO["odomReceived"]
+  odom["/odom"] --> cbO["odomReceived"]
   ndt["/ndt_pose"] --> cbN["ndtPoseReceived"]
   ip["/initialpose"] --> cbI["initialPoseReceived"]
   timer["タイマー<br/>predict_rate（50 Hz）"] --> cbT["timerCallback"]
@@ -17,7 +16,7 @@ flowchart LR
     cbN --> lag
     cbI -->|reset| lag
     lag["LaggedEkf<br/>観測と状態の履歴・巻き戻し"]
-    core["VehicleOdomEkf / VehicleEkf<br/>9 状態の EKF 本体"]
+    core["VehicleOdomEkf / VehicleEkf<br/>8 状態の EKF 本体"]
     lag --- core
     cbT -->|最新の状態をコピーして予測| lag
   end
@@ -32,7 +31,7 @@ flowchart LR
 | `EkfLocalizer` | `src/ekf_localizer_node.cpp` | 購読・配信・タイマー。ROS とのやりとり |
 | `LaggedEkf` | `src/lagged_ekf.cpp` | 観測を時刻順に保持し、遅れて届いた観測を正しい位置に入れ直す |
 | `VehicleEkf` | `src/vehicle_ekf.cpp` | EKF 本体（予測と、NDT の観測による更新） |
-| `VehicleOdomEkf` | `src/vehicle_odom_ekf.cpp` | `VehicleEkf` にオドメトリの観測と `s_omega` の推定を加えたもの（`ekf_model: ndt_odom`） |
+| `VehicleOdomEkf` | `src/vehicle_odom_ekf.cpp` | `VehicleEkf` にオドメトリの観測を加えたもの（`use_odom: true`） |
 
 コールバックは 1 つずつ順に実行されます（シングルスレッド）。1 回の処理は最も重い場合でも 0.3 ms 未満で、50 Hz の周期に対して十分に軽い処理です。
 
@@ -44,16 +43,15 @@ flowchart LR
 | 3–5 | roll, pitch, yaw | rad | map 座標での base の姿勢（ZYX） |
 | 6 | v | m/s | base の前進速度 |
 | 7 | omega | rad/s | ヨー角速度 |
-| 8 | s_omega | - | オドメトリの omega のスケール（オドメトリの omega / 真の omega）。`ndt_only` では 1 のまま |
 
 base は `base_frame_id` です（Gazebo：`base_footprint`、実機：`base_link`）。
 NDT が出すのは LiDAR の姿勢なので、base と LiDAR の間を取付 T_BL で変換します。T_BL は起動時に TF（base → `lidar_frame_id`）から読みます。
 
 ## 1. 起動
 
-1. パラメータを読む（`param/ekf.yaml` を、`localization_bringup` の環境ファイルで上書きしたもの）。
+1. パラメータを読む（`param/ekf.yaml`）。
 2. タイマーのたびに、TF から取付 base → LiDAR を引く。取れるまでは `Waiting for TF ...` を出して待つ。
-3. 取付が取れたらフィルタを作る（`ekf_model` が `ndt_odom` なら `VehicleOdomEkf`、`ndt_only` なら `VehicleEkf`）。この時点では**未初期化**で、何も配信しない。
+3. 取付が取れたらフィルタを作る（`use_odom` が true なら `VehicleOdomEkf`、false なら `VehicleEkf`）。この時点では**未初期化**で、何も配信しない。
 
 取付は起動時に 1 回しか読みません。静的 TF を変えたら、EKF も起動し直してください。
 
@@ -65,15 +63,15 @@ NDT が出すのは LiDAR の姿勢なので、base と LiDAR の間を取付 T_
 
 ```mermaid
 flowchart TD
-  A["/wheelchair/odom"] --> B["v = twist.linear.x<br/>omega = twist.angular.z<br/>stamp = header.stamp − odom_delay"]
-  B --> C{"ekf_model"}
-  C -->|ndt_only| X["使わない"]
-  C -->|ndt_odom| D["LaggedEkf::addOdom"]
+  A["/odom"] --> B["v = twist.linear.x<br/>omega = twist.angular.z<br/>stamp = header.stamp − odom_delay"]
+  B --> C{"use_odom"}
+  C -->|false| X["使わない"]
+  C -->|true| D["LaggedEkf::addOdom"]
   D --> E{"初期化済み？"}
   E -->|いいえ| F["値を覚えておくだけ<br/>（初期化のときに使う）"]
   E -->|はい| G["stamp まで予測"]
   G --> H{"マハラノビス距離 ≤ gate_odom？"}
-  H -->|はい| I["[v, omega] で更新<br/>h = [v, s_omega · omega]"]
+  H -->|はい| I["[v, omega] で更新<br/>h = [v, omega]"]
   H -->|いいえ| J["棄却（WARN）"]
 ```
 
@@ -81,15 +79,11 @@ flowchart TD
 - twist は車体座標なので、v・omega は状態の値と直接対応します（座標変換は不要）。
 - **遅れ（`odom_delay`）**：twist が実際の動きより遅れる分を stamp から引いて、正しい時刻の位置に入れます。
   Gazebo の diff_drive_controller は twist を 10 サンプル（50 Hz で 0.2 s）の移動平均で出すので、真値と比べて
-  v・omega とも 0.09〜0.10 s 遅れます（`gazebo.yaml` で 0.09）。遅れたまま入れると、旋回の開始・反転・停止で
+  v・omega とも 0.09〜0.10 s 遅れます（Gazebo では `odom_delay: 0.09`）。遅れたまま入れると、旋回の開始・反転・停止で
   yaw が 5〜10° ずれます。
-- **滑り（`s_omega`）**：観測モデルは h = [v, s_omega · omega] です。その場旋回では車輪が滑り、オドメトリの omega が
-  真値の約 1.09 倍になります（Gazebo）。これを白色ノイズとして扱うと、50 Hz で入るオドメトリに yaw が引っ張られ続け、
-  yaw の `Q` を小さくすると NDT がゲートで棄却されて破綻します。`s_omega` を推定すると、NDT の yaw の変化と
-  オドメトリの omega の比から 2〜3 秒で収束します。
-- `s_omega` は |omega| が `omega_scale_min_rate`（0.3 rad/s）以上のときだけ更新します。旋回していないときの
-  オドメトリはノイズしか持たず、積 s_omega · omega の推定では s_omega が 0 側へ引っ張られるためです
-  （単体テスト `OmegaScaleStaysWhileGoingStraight`）。更新後は `omega_scale_limits` の範囲に収めます。
+- **滑り**：その場旋回では車輪が滑り、オドメトリの omega が真値の約 1.09 倍になります（Gazebo）。
+  これは補正せず、白色ノイズとして扱います。50 Hz で入るオドメトリに yaw が引っ張られるので、yaw の `Q` を
+  小さくしすぎると NDT がゲートで棄却されて破綻します（既知の制限）。
 
 ### NDT の解（`ndtPoseReceived`）
 
@@ -110,7 +104,7 @@ flowchart TD
 
 - 観測ノイズは `R_ndt` です。`/ndt_pose` の共分散は使いません。
 - **観測モデル**：h(x) = T_MB(x) · T_BL。状態から予測した LiDAR の姿勢を NDT の解と比べます。ヤコビアンは h の中心差分で求めます。取付位置のずれ（レバーアーム）があるため、車両が傾いたり回転したりすると LiDAR の位置も動きますが、それも含めて厳密に扱えます。
-- **初期化**：最初の NDT の解から車両の姿勢を求めます。`ndt_odom` では、`t_scan` から `odom_timeout_init`（0.2 秒）以内のオドメトリがあれば、v・omega もその値から始めます（`EKF initialized from odometry`）。なければ 0 から始めます。
+- **初期化**：最初の NDT の解から車両の姿勢を求めます。`use_odom: true` では、`t_scan` から `odom_timeout_init`（0.2 秒）以内のオドメトリがあれば、v・omega もその値から始めます（`EKF initialized from odometry`）。なければ 0 から始めます。
 - **更新の順序とゲート**
 
 | 段 | 対象 | ゲート（既定） | 棄却が続いたとき |
@@ -157,11 +151,12 @@ sequenceDiagram
 | x, y | v cos(pitch) で水平に進む。omega による円弧として厳密に積分 |
 | z | −v sin(pitch) dt（坂を上り下りする分） |
 | yaw | yaw + omega dt |
-| roll, pitch, v, omega, s_omega | 変わらない（ランダムウォーク） |
+| roll, pitch, v, omega | 変わらない（ランダムウォーク） |
 
 - 共分散：P = F P Fᵀ + diag(`Q`) · dt。`Q` は単位時間あたりの分散（スペクトル密度）です。
-- **`Q` の v・omega は「速度がどれだけ急に変わりうるか」を表します。** 実際の加速より小さいと、オドメトリや NDT が予測と食い違ってゲートで棄却され、破綻します。Gazebo では MATLAB の指令による急旋回（角加速度 約 6.6 rad/s²）で、omega = 0.1 では足りませんでした。
+- **`Q` の v・omega は「速度がどれだけ急に変わりうるか」を表します。** 実際の加速より小さいと、オドメトリや NDT が予測と食い違ってゲートで棄却され、破綻します。Gazebo での急旋回（角加速度 約 6.6 rad/s²）で、omega = 0.1 では足りませんでした。
 - 1 回の予測で進める時間は最大 `max_predict_dt`（0.2 秒）です。これを超える間隔では、0.2 秒分だけ動かして時刻は最後まで進めます。
+  観測が届いている間（オドメトリ 50 Hz、NDT 約 10 Hz）は効きません。観測が途切れたときに大きく外挿しないための上限です。
 
 ## 5. 配信（`timerCallback`、`predict_rate`）
 
@@ -187,8 +182,6 @@ flowchart TD
 1. フィルタをリセットし、履歴を消す（直近のオドメトリだけは残し、次の初期化で使う）。
 2. 次の NDT の解で初期化し直す。それまでは何も配信しない。
 
-NDT 側も、`/initialpose` を受けてから 1 秒間は TF を初期値に使いません。
-
 ## 時刻
 
 すべての観測は `header.stamp` で時刻順に並べるので、観測の時刻が同じ時計で測られていることが前提です。
@@ -196,38 +189,15 @@ NDT 側も、`/initialpose` を受けてから 1 秒間は TF を初期値に使
 | 環境 | 時計 | 点群の stamp | オドメトリの stamp |
 |---|---|---|---|
 | Gazebo | sim time（`/clock`） | Gazebo が付けた値をそのまま使う | Gazebo が付けた値をそのまま使う |
-| 実機 | この PC の時計 | `cloud_stamp_corrector` がこの PC の時計に直す | `whill_odometry` が受信時刻を付ける |
+| 実機 | この PC の時計 | この PC の時計に直してから入れる | この PC の受信時刻 |
 
-## パラメータ（`param/ekf.yaml`）
+## パラメータ
 
-| 名前 | 既定値 | 内容 |
-|---|---|---|
-| `ekf_model` | `ndt_odom` | `ndt_only`：NDT だけ / `ndt_odom`：NDT とオドメトリ |
-| `predict_rate` | 50.0 | 配信の周期 [Hz] |
-| `history_length` | 1.0 | 巻き戻し用に観測を保持する長さ [s] |
-| `publish_tf` | true | map → base の TF を配信するか |
-| `map_frame_id` / `base_frame_id` / `lidar_frame_id` | `map` / `base_link` / `velodyne` | フレーム名（環境ファイルで上書き） |
-| `max_predict_dt` | 0.2 | 1 回の予測で進める時間の上限 [s] |
-| `Q` | [0.05, 0.05, 0.005, 0.05, 0.05, 0.05, 0.05, 1.0] | プロセスノイズ [x, y, z, roll, pitch, yaw, v, omega]（Gazebo は `gazebo.yaml` で [0.01, 0.01, 0.001, 0.002, 0.002, 0.001, 0.05, 1.0]） |
-| `R_ndt` | [0.01, 0.01, 0.01, 0.03, 0.03, 0.001] | NDT の観測ノイズ（LiDAR の姿勢の分散） |
-| `R_odom` | [0.0025, 0.005] | オドメトリの観測ノイズ [v, omega] |
-| `P_init` | [0.02, 0.02, 0.02, 0.06, 0.06, 0.002, 1.0, 1.0] | 初期化したときの共分散 |
-| `gate_horizontal` | 11.34 | NDT の [x, y, yaw] のゲート |
-| `gate_1d` | 6.63 | NDT の z、roll、pitch それぞれのゲート |
-| `lockout_count` | 10 | z、roll、pitch がこの回数続けて棄却されたら再初期化（0 以下で無効） |
-| `odom_covariance_source` | `param` | オドメトリの観測ノイズの出どころ（`param` / `message`） |
-| `gate_odom` | 9.21 | オドメトリのゲート |
-| `odom_timeout_init` | 0.2 | 初期化のとき、この時間以内のオドメトリがあれば v、omega をその値から始める [s] |
-| `odom_delay` | 0.0 | オドメトリの遅れ [s]。stamp から引く（Gazebo は `gazebo.yaml` で 0.09） |
-| `omega_scale_q` | 1.0e-4 | `s_omega` のプロセスノイズ [1/s] |
-| `omega_scale_var` | 0.01 | `s_omega` の初期分散。0 なら推定しない |
-| `omega_scale_limits` | [0.8, 1.25] | `s_omega` の範囲 |
-| `omega_scale_min_rate` | 0.3 | \|omega\| がこれ未満 [rad/s] のオドメトリでは `s_omega` を更新しない |
+[README.md](../README.md#パラメータ) を参照してください。
 
 ## 既知の制限
 
 - **オドメトリと NDT の水平系には、棄却が続いたときに回復する仕組みがありません。** `Q` が実際の動きに対して小さいと、棄却が続いたまま戻らなくなります（z、roll、pitch には `lockout_count` による再初期化があります）。
-  オドメトリの遅れと滑りを補っていないと、yaw の `Q` を小さくしたときにこの状態になります（`odom_delay`、`s_omega`）。
+  オドメトリの遅れ（`odom_delay`）を補っていないときや、車輪の滑りが大きいときに、yaw の `Q` を小さくするとこの状態になります。
 - 旋回の反転のように omega が段差で変わる瞬間は、オドメトリに現れるまで（移動平均で約 0.1 s）予測が追いつかず、
   その間だけ yaw が数度ずれます（Gazebo の反転で約 5°、0.15 s）。
-- NDT の初期値は EKF の TF から取るので、EKF が破綻すると NDT も正しく収束しなくなります。

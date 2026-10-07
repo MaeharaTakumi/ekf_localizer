@@ -17,8 +17,12 @@ namespace ekf_localizer
 /// EKF ノードのパラメータ一式（param/ekf.yaml）
 struct EkfConfig
 {
-  /// "ndt_only"（VehicleEkf）or "ndt_odom"（VehicleOdomEkf）
-  std::string model{"ndt_only"};
+  /// オドメトリを観測に使うか（true：VehicleOdomEkf / false：VehicleEkf）
+  bool use_odom{false};
+  /// 購読するトピック
+  std::string ndt_pose_topic{"ndt_pose"};
+  std::string odom_topic{"odom"};
+  std::string initialpose_topic{"initialpose"};
   /// 予測して配信する周期 [Hz]
   double predict_rate{50.0};
   /// 巻き戻しに備えて観測と状態を保持する長さ [s]（NDT の遅れより長くする）
@@ -45,7 +49,7 @@ void declareEkfParameters(rclcpp::Node & node);
 EkfConfig loadEkfConfig(rclcpp::Node & node);
 /// 読み込んだ値を INFO で出す
 void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg);
-/// model に応じた EKF を作る。mount は base → LiDAR の取付変換
+/// use_odom に応じた EKF を作る。mount は base → LiDAR の取付変換
 std::unique_ptr<VehicleEkf> createEkf(const EkfConfig & cfg, const Eigen::Affine3d & mount);
 
 }  // namespace ekf_localizer

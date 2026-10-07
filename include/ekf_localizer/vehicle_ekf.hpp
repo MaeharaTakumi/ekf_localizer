@@ -12,38 +12,36 @@ namespace ekf_localizer
 /// 角度を (-pi, pi] に正規化する
 double normalizeAngle(double angle);
 
-/// base_link 基準の 9 状態 EKF（docs/ekf_design.md 5.3 節、docs/ekf_3d_plan.md）
+/// base_link 基準の 8 状態 EKF（docs/ekf_design.md 5.3 節、docs/ekf_3d_plan.md）
 ///
-///   状態 x = [x_b, y_b, z_b, roll_b, pitch_b, yaw_b, v, omega, s_omega]^T
-///        … map → base_link の 6 自由度姿勢（ZYX）と、車体の前進速度・ヨー角速度、
-///          オドメトリの omega のスケール s_omega（オドメトリの omega = s_omega · 真の omega）
+///   状態 x = [x_b, y_b, z_b, roll_b, pitch_b, yaw_b, v, omega]^T
+///        … map → base_link の 6 自由度姿勢（ZYX）と、車体の前進速度・ヨー角速度
 ///   運動 車体 x 軸方向にだけ進む。水平は円弧の厳密積分（速度 v cos(pitch)）、z は -v sin(pitch)。
-///        roll, pitch, v, omega, s_omega はランダムウォーク
+///        roll, pitch, v, omega はランダムウォーク
 ///   観測 NDT の LiDAR 姿勢 h(x) = T_MB(x) · T_BL。取付オフセットは roll, pitch, yaw 全部で回す
 ///        更新は [x, y, yaw] → z → roll → pitch の逐次で、それぞれ独立にゲート判定する
 ///
 ///   **オドメトリは一切使わない。** v, omega は NDT 姿勢列から推定する（観測に加えるのは VehicleOdomEkf）。
-///   s_omega は VehicleOdomEkf だけが使う。このクラスでは q, p_init の s_omega を 0 にして 1 のまま動かさない。
 ///
 /// ROS に依存しない。時刻はすべて double（秒）で扱う。
 class VehicleEkf
 {
 public:
-  static constexpr int kN = 9;
+  static constexpr int kN = 8;
   using StateVector = Eigen::Matrix<double, kN, 1>;
   using StateMatrix = Eigen::Matrix<double, kN, kN>;
   using Vector6d = Eigen::Matrix<double, 6, 1>;
   using Matrix6xN = Eigen::Matrix<double, 6, kN>;
 
   /// 状態の添字
-  enum Index {kX = 0, kY, kZ, kRoll, kPitch, kYaw, kV, kOmega, kOmegaScale};
+  enum Index {kX = 0, kY, kZ, kRoll, kPitch, kYaw, kV, kOmega};
 
   struct Params
   {
     /// プロセスノイズ（スペクトル密度、状態と同じ並び）
-    /// [x, y, z, roll, pitch, yaw] [m^2/s], [rad^2/s]、[v, omega] [m^2/s^3], [rad^2/s^3]、s_omega [1/s]
+    /// [x, y, z, roll, pitch, yaw] [m^2/s], [rad^2/s]、[v, omega] [m^2/s^3], [rad^2/s^3]
     StateVector q =
-      (StateVector() << 1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3, 0.05, 0.2, 0.0).finished();
+      (StateVector() << 1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3, 0.05, 0.2).finished();
     /// NDT 観測ノイズ（LiDAR 座標の [x, y, z, roll, pitch, yaw]）[m^2], [rad^2]
     Vector6d r_ndt =
       (Vector6d() << 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-6, 1.0e-6, 1.0e-6).finished();
@@ -65,7 +63,7 @@ public:
     int lockout_count{10};
     /// 初期共分散の対角（分散、状態と同じ並び）
     StateVector p_init =
-      (StateVector() << 2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6, 1.0, 1.0, 0.0).finished();
+      (StateVector() << 2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6, 1.0, 1.0).finished();
     /// 1 回の予測で進める dt の上限 [s]
     double max_predict_dt{0.2};
   };
@@ -123,8 +121,6 @@ public:
 
   double velocity() const {return x_(kV);}
   double angularVelocity() const {return x_(kOmega);}
-  /// オドメトリの omega のスケール（オドメトリの omega = これ · 真の omega）
-  double omegaScale() const {return x_(kOmegaScale);}
   /// 状態が表している時刻 t_last [s]（最後に予測・初期化した時刻）
   double lastStamp() const {return t_last_;}
   double lastDt() const {return last_dt_;}

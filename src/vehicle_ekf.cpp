@@ -94,7 +94,7 @@ VehicleEkf::StateVector VehicleEkf::propagate(const StateVector & x, double dt)
   xn(kZ) -= v * st * dt;   // ZYX ではピッチ正が機首下げ。上り坂は pitch < 0 で z が増える
   // yaw の変化率は本来 omega cos(roll)/cos(pitch) だが omega で近似する（1/12 勾配で 0.35%）
   xn(kYaw) = normalizeAngle(x(kYaw) + omega * dt);
-  // roll, pitch, v, omega, s_omega はランダムウォーク
+  // roll, pitch, v, omega はランダムウォーク
   return xn;
 }
 
@@ -140,7 +140,7 @@ VehicleEkf::Vector6d VehicleEkf::observe(const StateVector & x) const
 
 VehicleEkf::Matrix6xN VehicleEkf::observationJacobian(const StateVector & x) const
 {
-  // RPY 抽出が取付回転を含むと解析式が長くなるので中心差分で求める。h は v, omega, s_omega に依存しない
+  // RPY 抽出が取付回転を含むと解析式が長くなるので中心差分で求める。h は v, omega に依存しない
   constexpr double kStep = 1.0e-6;
   Matrix6xN H = Matrix6xN::Zero();
   for (int j = 0; j < 6; ++j) {
@@ -170,7 +170,6 @@ void VehicleEkf::initialize(const Vector6d & z, double stamp)
   x_.setZero();
   x_.head<3>() = T_mb.translation();
   x_.segment<3>(kRoll) = rpyFromRotation(T_mb.linear());
-  x_(kOmegaScale) = 1.0;
 
   P_ = prm_.p_init.asDiagonal();
 
