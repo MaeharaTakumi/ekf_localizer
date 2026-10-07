@@ -15,13 +15,13 @@
 
       # プロセスノイズ（スペクトル密度）[x, y, z, roll, pitch, yaw, v, omega]
       # [m^2/s], [rad^2/s], [m^2/s^3], [rad^2/s^3]
-      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 1.0]
+      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 1.0e-2]
       # NDT 観測ノイズ（分散、LiDAR 座標）[x, y, z, roll, pitch, yaw] [m^2], [rad^2]
       R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3]
       # オドメトリ観測ノイズ（分散）[v, omega] [m^2/s^2], [rad^2/s^2]
       R_odom: [2.5e-3, 5.0e-3]
       # 初期共分散（分散、base）[x, y, z, roll, pitch, yaw, v, omega]
-      P_init: [2.0e-2, 2.0e-2, 2.0e-2, 0.06, 0.06, 2.0e-3, 1.0, 1.0]
+      P_init: [2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.01]
 
       gate_horizontal: 11.34               # NDT の [x, y, yaw] のゲート（chi2(3, 0.99)）
       gate_1d: 6.63                        # NDT の z, roll, pitch それぞれのゲート（chi2(1, 0.99)）
@@ -30,11 +30,11 @@
       odom_covariance_source: "param"      # R_odom の出どころ："param"（上の R_odom）/ "message"（twist.covariance）
       gate_odom: 1.0e9                      # オドメトリのゲート（chi2(2, 0.99)）
       odom_timeout_init: 0.2               # 初期化時、この秒数以内のオドメトリがあれば v, omega をその値にする [s]
-      odom_delay: 0.0                      # オドメトリの遅れ [s]。stamp から引いて補う（環境ファイルで設定。Gazebo は 0.09）
+      odom_delay: 0.09                      # オドメトリの遅れ [s]。stamp から引いて補う（環境ファイルで設定。Gazebo は 0.09）
 
       # オドメトリの omega のスケール s_omega（オドメトリの omega / 真の omega。車輪の滑り）の推定
       # その場旋回では車輪が滑り、オドメトリの omega が真値より一定の割合で大きくなる（Gazebo で約 1.09 倍）
       omega_scale_q: 1.0e-4                # s_omega のプロセスノイズ [1/s]
-      omega_scale_var: 1.0e-2              # s_omega の初期分散（sd 0.1）。0 なら推定しない（s_omega = 1）
+      omega_scale_var: 0.0             # s_omega の初期分散（sd 0.1）。0 なら推定しない（s_omega = 1）
       omega_scale_limits: [0.8, 1.25]      # s_omega の範囲
-      omega_scale_min_rate: 0.3            # |omega| がこれ未満 [rad/s] のオドメトリでは s_omega を更新しない
+      omega_scale_min_rate: 0.0            # |omega| がこれ未満 [rad/s] のオドメトリでは s_omega を更新しない
