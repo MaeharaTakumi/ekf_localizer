@@ -35,9 +35,9 @@ public:
   void setOdomParams(const OdomParams & p) {odom_prm_ = p;}
   const OdomParams & odomParams() const {return odom_prm_;}
 
-  /// オドメトリ観測。stamp まで予測してから更新する。
+  /// オドメトリ観測。update() と同じく、予測（predictTo(stamp)）は呼び出し側で済ませておく。
   /// r は観測ノイズの分散（r_odom かメッセージの値。呼び出し側が選ぶ）。
-  /// 未初期化でも値は記録し、次の initialize() で使う。
+  /// 未初期化でも値と stamp は記録し、次の initialize() で使う。
   /// 戻り値：更新したら true、未初期化・ゲート棄却なら false
   bool updateOdom(double v, double omega, const Eigen::Vector2d & r, double stamp);
 

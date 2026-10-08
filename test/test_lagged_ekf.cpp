@@ -115,6 +115,7 @@ std::unique_ptr<VehicleOdomEkf> runInOrder(std::vector<Meas> ms)
   auto ekf = makeOdomEkf();
   for (const Meas & m : ms) {
     if (!m.ndt) {
+      ekf->predictTo(m.stamp);
       ekf->updateOdom(m.v, m.omega, kROdom, m.stamp);
     } else if (!ekf->initialized()) {
       ekf->initialize(m.z, m.stamp);

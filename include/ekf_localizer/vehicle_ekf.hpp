@@ -140,6 +140,13 @@ public:
   static Eigen::Affine3d poseFromState(const StateVector & x);
 
 protected:
+  /// 一般形の KF 更新（NDT・オドメトリ共通）。y = z - h(x) は角度成分を wrap して渡す。
+  /// マハラノビス距離 d2 がゲート以下なら更新して true、棄却なら状態を変えず false。
+  /// 実体化は M = 1, 2, 3（vehicle_ekf.cpp）
+  template<int M>
+  bool kalmanUpdate(
+    const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, kN> & H,
+    const Eigen::Matrix<double, M, M> & R, double gate, double & d2_out);
   /// 観測 z_lidar の成分 idx（LiDAR の並び）を使った逐次更新。
   /// ゲートを通れば更新して true、棄却なら状態を変えず false
   template<int M>

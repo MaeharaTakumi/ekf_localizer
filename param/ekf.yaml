@@ -26,6 +26,7 @@
       gate_horizontal: 11.34
       gate_1d: 6.63
       lockout_count: 10
+      ndt_delay: 0.0
 
       odom_covariance_source: "param"
       gate_odom: 1.0e9

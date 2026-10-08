@@ -160,6 +160,7 @@ SimResult simulate(VehicleEkf & ekf, VehicleOdomEkf * odom_ekf, const SimConfig 
       double w = s.w + cfg.odom_w_sigma * n01(rng);
       cfg.odom_corrupt(tr, v, w);
       const bool was_init = ekf.initialized();
+      odom_ekf->predictTo(t);
       const bool ok = odom_ekf->updateOdom(v, w, r_odom, t);
       if (was_init) {
         ++res.odom_updates;
@@ -575,7 +576,7 @@ TEST(VehicleOdomEkf, UpdateMatchesGenericKalmanWithH)
   const MS IKH = MS::Identity() - K * H;
   const MS P_exp = IKH * P * IKH.transpose() + K * R * K.transpose();
 
-  ASSERT_TRUE(ekf.updateOdom(z(0), z(1), r, t));   // 同時刻なので予測は入らない
+  ASSERT_TRUE(ekf.updateOdom(z(0), z(1), r, t));
   EXPECT_LT((ekf.state() - x_exp).cwiseAbs().maxCoeff(), 1e-12);
   EXPECT_LT((ekf.covariance() - P_exp).cwiseAbs().maxCoeff(), 1e-12);
   EXPECT_NEAR(ekf.lastOdomMahalanobis(), y.dot(S.inverse() * y), 1e-9);
@@ -656,14 +657,12 @@ TEST(VehicleOdomEkf, SingleOutlierRejected)
   simulate(ekf, &ekf, cfg);
   const VS x_before = ekf.state();
   const MS P_before = ekf.covariance();
-  // 直前の予測と同時刻に入れるので、予測は入らず更新の有無だけが見える
-  const double t_end = 1000.0 + static_cast<int>(cfg.duration / 0.025) * 0.025;
-  EXPECT_FALSE(ekf.updateOdom(3.0, 0.0, Eigen::Vector2d(2.5e-3, 5.0e-3), t_end));
+  // updateOdom は予測しないので、更新の有無だけが見える
+  EXPECT_FALSE(ekf.updateOdom(3.0, 0.0, Eigen::Vector2d(2.5e-3, 5.0e-3), ekf.lastStamp()));
   EXPECT_GT(ekf.lastOdomMahalanobis(), 9.21);
   EXPECT_EQ(ekf.odomRejectCount(), 1);
-  // t_end は加算の累積誤差で sim の時刻とごくわずかにずれるので、極小の予測ぶんは許す
-  EXPECT_LT((ekf.state() - x_before).cwiseAbs().maxCoeff(), 1e-9) << "外れ値で状態が動かない";
-  EXPECT_LT((ekf.covariance() - P_before).cwiseAbs().maxCoeff(), 1e-9);
+  EXPECT_TRUE(ekf.state() == x_before) << "外れ値で状態が動かない";
+  EXPECT_TRUE(ekf.covariance() == P_before);
 }
 
 TEST(VehicleOdomEkf, WrongOmegaSignIsNotCaughtByOdomGate)

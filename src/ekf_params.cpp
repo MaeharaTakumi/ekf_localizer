@@ -29,6 +29,7 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("gate_horizontal", 11.34);
   node.declare_parameter("gate_1d", 6.63);
   node.declare_parameter("lockout_count", 10);
+  node.declare_parameter("ndt_delay", 0.0);
 
   // オドメトリ観測（use_odom: true のみ）
   node.declare_parameter("odom_covariance_source", "param");
@@ -103,6 +104,12 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   node.get_parameter("gate_1d", prm.gate_1d);
   node.get_parameter("lockout_count", prm.lockout_count);
   node.get_parameter("max_predict_dt", prm.max_predict_dt);
+  node.get_parameter("ndt_delay", cfg.ndt_delay);
+  if (!(cfg.ndt_delay >= 0.0) || cfg.ndt_delay >= cfg.history_length) {
+    RCLCPP_WARN(
+      logger, "ndt_delay must be in [0, history_length) (got %lf). Using 0.0.", cfg.ndt_delay);
+    cfg.ndt_delay = 0.0;
+  }
 
   VehicleOdomEkf::OdomParams & oprm = cfg.odom_params;
   if (load("R_odom", 2, r_odom)) {
@@ -140,6 +147,7 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     logger, "ekf gate_horizontal: %lf, gate_1d: %lf, lockout_count: %d",
     prm.gate_horizontal, prm.gate_1d, prm.lockout_count);
   RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", prm.max_predict_dt);
+  RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", cfg.ndt_delay);
   RCLCPP_INFO(
     logger, "ekf Q(x,y,z,roll,pitch,yaw,v,omega): [%g, %g, %g, %g, %g, %g, %g, %g]",
     prm.q(0), prm.q(1), prm.q(2), prm.q(3), prm.q(4), prm.q(5), prm.q(6), prm.q(7));

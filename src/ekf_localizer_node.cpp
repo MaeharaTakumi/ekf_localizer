@@ -88,12 +88,6 @@ void EkfLocalizer::ndtPoseReceived(
   const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg)
 {
   if (!filter_) {return;}
-  if (msg->header.frame_id != cfg_.map_frame_id) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000, "ndt_pose frame_id \"%s\" is not \"%s\". Ignored.",
-      msg->header.frame_id.c_str(), cfg_.map_frame_id.c_str());
-    return;
-  }
 
   // NDT の解は map → LiDAR の姿勢。共分散は使わない（観測ノイズは R_ndt）
   const auto & p = msg->pose.pose;
@@ -104,17 +98,18 @@ void EkfLocalizer::ndtPoseReceived(
   VehicleEkf::Vector6d z;
   z << p.position.x, p.position.y, p.position.z, roll, pitch, yaw;
 
-  const double stamp = rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds();
+  // 点群の取得時刻が stamp より ndt_delay だけ前のときに補う
+  const double stamp =
+    rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds() - cfg_.ndt_delay;
   const LaggedEkf::NdtResult r = filter_->addNdt(z, stamp);
 
   if (r.status == Status::kTooOld) {
-    RCLCPP_WARN(
-      get_logger(), "NDT pose is older than the history (%.3f s behind the latest). "
-      "Increase history_length.", filter_->current().lastStamp() - stamp);
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "NDT pose is older than the history (%.3f s behind the latest). Increase history_length.",
+      filter_->latestStamp() - stamp);
     return;
   }
-  RCLCPP_DEBUG(
-    get_logger(), "NDT pose at %.3f: %zu later measurements replayed.", stamp, r.replayed);
 
   if (r.initialized) {
     const auto * odom_ekf = dynamic_cast<const VehicleOdomEkf *>(&filter_->current());
@@ -175,7 +170,9 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
 
   if (res.status == Status::kTooOld) {
     RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000, "Odometry is older than the history. Ignored.");
+      get_logger(), *get_clock(), 5000,
+      "Odometry is older than the history (%.3f s behind the latest). Increase history_length.",
+      filter_->latestStamp() - stamp);
   } else if (res.filter_initialized && !res.accepted) {
     RCLCPP_WARN(
       get_logger(), "Odometry v=%.3f omega=%.3f rejected by gate (d2 = %lf, %d times in a row).",

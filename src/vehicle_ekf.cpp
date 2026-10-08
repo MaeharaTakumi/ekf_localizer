@@ -221,6 +221,35 @@ void VehicleEkf::predictTo(double stamp)
 // ---------------------------------------------------------------------------
 
 template<int M>
+bool VehicleEkf::kalmanUpdate(
+  const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, kN> & H,
+  const Eigen::Matrix<double, M, M> & R, double gate, double & d2_out)
+{
+  const Eigen::Matrix<double, M, M> S = H * P_ * H.transpose() + R;
+  const Eigen::Matrix<double, M, M> S_inv = S.inverse();
+  const double d2 = y.dot(S_inv * y);
+  d2_out = d2;
+  if (!std::isfinite(d2) || d2 > gate) {return false;}
+
+  const Eigen::Matrix<double, kN, M> K = P_ * H.transpose() * S_inv;
+  x_ += K * y;
+  wrapStateAngles(x_);
+  const StateMatrix IKH = StateMatrix::Identity() - K * H;
+  P_ = IKH * P_ * IKH.transpose() + K * R * K.transpose();   // Joseph 形
+  return true;
+}
+
+template bool VehicleEkf::kalmanUpdate<1>(
+  const Eigen::Matrix<double, 1, 1> &, const Eigen::Matrix<double, 1, kN> &,
+  const Eigen::Matrix<double, 1, 1> &, double, double &);
+template bool VehicleEkf::kalmanUpdate<2>(
+  const Eigen::Matrix<double, 2, 1> &, const Eigen::Matrix<double, 2, kN> &,
+  const Eigen::Matrix<double, 2, 2> &, double, double &);
+template bool VehicleEkf::kalmanUpdate<3>(
+  const Eigen::Matrix<double, 3, 1> &, const Eigen::Matrix<double, 3, kN> &,
+  const Eigen::Matrix<double, 3, 3> &, double, double &);
+
+template<int M>
 bool VehicleEkf::sequentialUpdate(
   const Vector6d & z, const int (&idx)[M], double gate, double & d2_out)
 {
@@ -236,19 +265,7 @@ bool VehicleEkf::sequentialUpdate(
     H.row(i) = H_full.row(idx[i]);
     R(i, i) = prm_.r_ndt(idx[i]);
   }
-
-  const Eigen::Matrix<double, M, M> S = H * P_ * H.transpose() + R;
-  const Eigen::Matrix<double, M, M> S_inv = S.inverse();
-  const double d2 = y.dot(S_inv * y);
-  d2_out = d2;
-  if (!std::isfinite(d2) || d2 > gate) {return false;}
-
-  const Eigen::Matrix<double, kN, M> K = P_ * H.transpose() * S_inv;
-  x_ += K * y;
-  wrapStateAngles(x_);
-  const StateMatrix IKH = StateMatrix::Identity() - K * H;
-  P_ = IKH * P_ * IKH.transpose() + K * R * K.transpose();   // Joseph 形
-  return true;
+  return kalmanUpdate<M>(y, H, R, gate, d2_out);
 }
 
 VehicleEkf::ScalarResult VehicleEkf::scalarUpdate(

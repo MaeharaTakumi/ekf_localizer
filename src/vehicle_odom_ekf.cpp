@@ -1,7 +1,5 @@
 #include "ekf_localizer/vehicle_odom_ekf.hpp"
 
-#include <Eigen/LU>
-
 #include <cmath>
 
 namespace ekf_localizer
@@ -16,33 +14,17 @@ bool VehicleOdomEkf::updateOdom(double v, double omega, const Eigen::Vector2d & 
 
   if (!initialized_) {return false;}
 
-  predictTo(stamp);
-
   // h(x) = [v, omega]。H は v, omega の列だけが 1
   Eigen::Matrix<double, 2, kN> H = Eigen::Matrix<double, 2, kN>::Zero();
   H(0, kV) = 1.0;
   H(1, kOmega) = 1.0;
   const Eigen::Vector2d y = last_odom_z_ - Eigen::Vector2d(x_(kV), x_(kOmega));
   const Eigen::Matrix2d R = r.asDiagonal();
-  const Eigen::Matrix<double, kN, 2> PHt = P_ * H.transpose();
-  const Eigen::Matrix2d S = H * PHt + R;
-  const Eigen::Matrix2d S_inv = S.inverse();
-
-  const double d2 = y.dot(S_inv * y);
-  last_odom_d2_ = d2;
-  if (!std::isfinite(d2) || d2 > odom_prm_.gate_odom) {
+  if (!kalmanUpdate<2>(y, H, R, odom_prm_.gate_odom, last_odom_d2_)) {
     ++odom_reject_count_;
     return false;
   }
   odom_reject_count_ = 0;
-
-  const Eigen::Matrix<double, kN, 2> K = PHt * S_inv;
-  x_ += K * y;
-  x_(kRoll) = normalizeAngle(x_(kRoll));
-  x_(kPitch) = normalizeAngle(x_(kPitch));
-  x_(kYaw) = normalizeAngle(x_(kYaw));
-  const StateMatrix IKH = StateMatrix::Identity() - K * H;
-  P_ = IKH * P_ * IKH.transpose() + K * R * K.transpose();   // Joseph 形
   return true;
 }
 

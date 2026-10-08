@@ -41,14 +41,16 @@ LaggedEkf::Outcome LaggedEkf::apply(VehicleEkf & ekf, const Measurement & m)
 {
   Outcome out;
   out.was_initialized = ekf.initialized();
+  if (m.type == Measurement::Type::kNdt && !ekf.initialized()) {
+    ekf.initialize(m.z_ndt, m.stamp);
+    out.initialized_now = true;
+    return out;
+  }
+
+  // どの観測も stamp まで予測してから更新する（未初期化なら予測は何もしない）
+  ekf.predictTo(m.stamp);
   if (m.type == Measurement::Type::kNdt) {
-    if (!ekf.initialized()) {
-      ekf.initialize(m.z_ndt, m.stamp);
-      out.initialized_now = true;
-    } else {
-      ekf.predictTo(m.stamp);
-      out.ndt = ekf.update(m.z_ndt);
-    }
+    out.ndt = ekf.update(m.z_ndt);
   } else {
     // オドメトリは uses_odom_ のときだけ入るので VehicleOdomEkf
     out.odom_accepted =
