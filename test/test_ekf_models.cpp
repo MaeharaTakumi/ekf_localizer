@@ -1,4 +1,4 @@
-// VehicleEkf / VehicleOdomEkf の単体テスト（ROS 非依存）
+// EkfCore と観測モデル（NdtModel / OdomModel）の単体テスト（ROS 非依存）
 //   colcon build --packages-select ekf_localizer
 //   colcon test --packages-select ekf_localizer --event-handlers console_direct+
 #include <gtest/gtest.h>
@@ -7,31 +7,92 @@
 
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <random>
 #include <vector>
 
-#include "ekf_localizer/vehicle_ekf.hpp"
-#include "ekf_localizer/vehicle_odom_ekf.hpp"
+#include "ekf_localizer/ekf_core.hpp"
+#include "ekf_localizer/ndt_model.hpp"
+#include "ekf_localizer/observation_model.hpp"
+#include "ekf_localizer/odom_model.hpp"
 
+using ekf_localizer::applyMeasurement;
+using ekf_localizer::EkfCore;
+using ekf_localizer::NdtModel;
 using ekf_localizer::normalizeAngle;
-using ekf_localizer::VehicleEkf;
-using ekf_localizer::VehicleOdomEkf;
-using VS = VehicleEkf::StateVector;
-using MS = VehicleEkf::StateMatrix;
-using V6 = VehicleEkf::Vector6d;
-using SR = VehicleEkf::ScalarResult;
+using ekf_localizer::OdomModel;
+using ekf_localizer::Outcome;
+using VS = EkfCore::StateVector;
+using MS = EkfCore::StateMatrix;
+using V6 = NdtModel::Vector6d;
+using SR = ekf_localizer::StageResult::Status;
 
 namespace
 {
 
-VehicleEkf::Params P0()
+Eigen::Matrix3d rotRpy(double r, double p, double y)
 {
-  VehicleEkf::Params p;
+  return (Eigen::AngleAxisd(y, Eigen::Vector3d::UnitZ()) *
+         Eigen::AngleAxisd(p, Eigen::Vector3d::UnitY()) *
+         Eigen::AngleAxisd(r, Eigen::Vector3d::UnitX())).toRotationMatrix();
+}
+
+Eigen::Affine3d makePose(double x, double y, double z, double r, double p, double yaw)
+{
+  Eigen::Affine3d T = Eigen::Affine3d::Identity();
+  T.linear() = rotRpy(r, p, yaw);
+  T.translation() = Eigen::Vector3d(x, y, z);
+  return T;
+}
+
+/// テスト用のパラメータ一式（取付 base → LiDAR も含む）
+struct TestParams
+{
+  EkfCore::Params core;
+  NdtModel::Params ndt;
+  OdomModel::Params odom;
+  double o_x{0.0}, o_y{0.0}, o_z{0.0}, roll_o{0.0}, pitch_o{0.0}, yaw_o{0.0};
+
+  Eigen::Affine3d mount() const {return makePose(o_x, o_y, o_z, roll_o, pitch_o, yaw_o);}
+};
+
+TestParams P0()
+{
+  TestParams p;
   p.o_x = -0.2; p.o_y = 0.05; p.o_z = 1.2; p.yaw_o = -0.034; p.roll_o = 0.01; p.pitch_o = 0.02;
-  p.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
-  p.r_ndt << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 5e-3;
-  p.p_init << 2 * p.r_ndt, 1.0, 1.0;
+  p.core.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
+  p.ndt.r << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 5e-3;
+  p.core.p_init << 2 * p.ndt.r, 1.0, 1.0;
   return p;
+}
+
+/// EKF 本体と観測モデルの組（odom が null なら NDT だけ）
+struct Rig
+{
+  EkfCore core;
+  std::shared_ptr<NdtModel> ndt;
+  std::shared_ptr<OdomModel> odom;
+
+  /// NDT の解を適用する（未初期化なら初期化、初期化済みなら予測して更新）
+  Outcome addNdt(const V6 & z, double t) {return applyMeasurement(core, ndt->measurement(z, t));}
+  /// オドメトリを適用する（未初期化なら覚えるだけ、初期化済みなら予測して更新）
+  Outcome addOdom(double v, double w, const Eigen::Vector2d & r, double t)
+  {
+    return applyMeasurement(core, odom->measurement(v, w, r, t));
+  }
+  /// 予測してから NDT で更新する（初期化済みのとき）。段ごとの結果を返す
+  std::vector<ekf_localizer::StageResult> updateNdt(const V6 & z, double t)
+  {
+    return addNdt(z, t).stages;
+  }
+};
+
+Rig makeRig(const TestParams & p, bool use_odom)
+{
+  Rig rig{EkfCore(p.core), nullptr, nullptr};
+  rig.ndt = std::make_shared<NdtModel>(p.ndt, p.mount(), rig.core);
+  if (use_odom) {rig.odom = std::make_shared<OdomModel>(p.odom, rig.core);}
+  return rig;
 }
 
 bool psdOK(const Eigen::MatrixXd & P)
@@ -42,20 +103,13 @@ bool psdOK(const Eigen::MatrixXd & P)
 }
 
 /// base の真値から LiDAR 観測を作る（水平面）
-V6 lidarObs(const VehicleEkf::Params & p, double xb, double yb, double psib)
+V6 lidarObs(const TestParams & p, double xb, double yb, double psib)
 {
   const double c = std::cos(psib), s = std::sin(psib);
   V6 z;
   z << xb + p.o_x * c - p.o_y * s, yb + p.o_x * s + p.o_y * c, p.o_z, p.roll_o, p.pitch_o,
     normalizeAngle(psib + p.yaw_o);
   return z;
-}
-
-Eigen::Matrix3d rotRpy(double r, double p, double y)
-{
-  return (Eigen::AngleAxisd(y, Eigen::Vector3d::UnitZ()) *
-         Eigen::AngleAxisd(p, Eigen::Vector3d::UnitY()) *
-         Eigen::AngleAxisd(r, Eigen::Vector3d::UnitX())).toRotationMatrix();
 }
 
 /// 回転行列 → [roll, pitch, yaw]（ZYX、tf2 の getRPY と同じ）
@@ -73,19 +127,14 @@ V6 poseVec(const Eigen::Affine3d & T)
   return z;
 }
 
-/// base の 6 自由度の真値から LiDAR 観測を作る（T_ML = T_MB · T_BL）
-V6 lidarObs3d(const VehicleEkf & ekf, const Eigen::Affine3d & T_mb)
+/// base の 6 自由度の真値から LiDAR 観測を作る（T_L = T_B · T_BL）
+V6 lidarObs3d(const NdtModel & ndt, const Eigen::Affine3d & T_mb)
 {
-  return poseVec(T_mb * ekf.mountTransform());
+  return poseVec(T_mb * ndt.mountTransform());
 }
 
-Eigen::Affine3d makePose(double x, double y, double z, double r, double p, double yaw)
-{
-  Eigen::Affine3d T = Eigen::Affine3d::Identity();
-  T.linear() = rotRpy(r, p, yaw);
-  T.translation() = Eigen::Vector3d(x, y, z);
-  return T;
-}
+/// 推定した LiDAR の姿勢
+Eigen::Affine3d lidarPose(const Rig & rig) {return rig.ndt->lidarPose(rig.core.state());}
 
 // ---------------------------------------------------------------------------
 // 走行シミュレーション：25 ms 刻み。オドメトリ 20 Hz（奇数ステップ）、NDT 10 Hz（4 ステップごと）
@@ -135,14 +184,13 @@ struct SimResult
   bool psd_always{true};
 };
 
-/// odom_ekf が null なら ndt_only として走らせる（オドメトリを渡さない）
-SimResult simulate(VehicleEkf & ekf, VehicleOdomEkf * odom_ekf, const SimConfig & cfg)
+/// rig.odom が null なら ndt_only として走らせる（オドメトリを渡さない）
+SimResult simulate(Rig & rig, const SimConfig & cfg, const TestParams & p)
 {
-  const auto p = ekf.params();
   std::mt19937 rng(cfg.seed);
   std::normal_distribution<double> n01(0.0, 1.0);
-  const Eigen::Vector2d r_odom =
-    odom_ekf ? odom_ekf->odomParams().r_odom : Eigen::Vector2d(2.5e-3, 5.0e-3);
+  const Eigen::Vector2d r_odom = rig.odom ? rig.odom->params().r : Eigen::Vector2d(2.5e-3, 5.0e-3);
+  EkfCore & ekf = rig.core;
 
   Truth s;
   SimResult res;
@@ -155,16 +203,14 @@ SimResult simulate(VehicleEkf & ekf, VehicleOdomEkf * odom_ekf, const SimConfig 
     s.advance(DT);
     t += DT;
 
-    if (odom_ekf && (k % 2 == 1) && cfg.odom_on(tr)) {
+    if (rig.odom && (k % 2 == 1) && cfg.odom_on(tr)) {
       double v = s.v + cfg.odom_v_sigma * n01(rng);
       double w = s.w + cfg.odom_w_sigma * n01(rng);
       cfg.odom_corrupt(tr, v, w);
-      const bool was_init = ekf.initialized();
-      odom_ekf->predictTo(t);
-      const bool ok = odom_ekf->updateOdom(v, w, r_odom, t);
-      if (was_init) {
+      const Outcome o = rig.addOdom(v, w, r_odom, t);
+      if (o.was_initialized) {
         ++res.odom_updates;
-        if (!ok) {++res.odom_rejects;}
+        if (o.stages.at(0).status != SR::kUpdated) {++res.odom_rejects;}
       }
     }
     if (k % 4 == 0 && cfg.ndt_on(tr)) {
@@ -172,12 +218,7 @@ SimResult simulate(VehicleEkf & ekf, VehicleOdomEkf * odom_ekf, const SimConfig 
       z(0) += cfg.ndt_pos_sigma * n01(rng);
       z(1) += cfg.ndt_pos_sigma * n01(rng);
       z(5) = normalizeAngle(z(5) + cfg.ndt_yaw_sigma * n01(rng));
-      if (!ekf.initialized()) {
-        ekf.initialize(z, t);
-      } else {
-        ekf.predictTo(t);
-        ekf.update(z);
-      }
+      rig.addNdt(z, t);
     }
     if (!ekf.initialized()) {continue;}
     ekf.predictTo(t);
@@ -185,7 +226,7 @@ SimResult simulate(VehicleEkf & ekf, VehicleOdomEkf * odom_ekf, const SimConfig 
     const auto b = ekf.basePose().translation();
     res.samples.push_back(
       {tr, std::hypot(b.x() - s.x, b.y() - s.y), ekf.velocity(), ekf.angularVelocity(), s.v, s.w,
-        normalizeAngle(ekf.state()(VehicleEkf::kYaw) - s.psi)});
+        normalizeAngle(ekf.state()(EkfCore::kYaw) - s.psi)});
   }
   return res;
 }
@@ -208,26 +249,19 @@ double rmsOver(
   return std::sqrt(meanOver(r, t0, t1, [&](const Sample & s) {const double e = f(s); return e * e;}));
 }
 
-VehicleOdomEkf makeOdomEkf(const VehicleEkf::Params & p = P0())
-{
-  VehicleOdomEkf ekf;
-  ekf.setParams(p);
-  return ekf;
-}
-
 }  // namespace
 
 // ===========================================================================
-// VehicleEkf（NDT のみ、8 状態）
+// EkfCore（運動モデル）
 // ===========================================================================
 
-TEST(VehicleEkf, ArcIntegrationIsExact)
+TEST(EkfCore, ArcIntegrationIsExact)
 {
-  using E = VehicleEkf;
+  using E = EkfCore;
   VS x = VS::Zero();
   x(E::kX) = 1.0; x(E::kY) = 2.0; x(E::kYaw) = 0.3; x(E::kV) = 1.2; x(E::kOmega) = 0.8;
   for (double dt : {0.05, 0.2, 1.0, 3.0}) {
-    const VS xn = VehicleEkf::propagate(x, dt);
+    const VS xn = EkfCore::propagate(x, dt);
     const double R = x(E::kV) / x(E::kOmega);
     const double ex = x(E::kX) + R * (std::sin(x(E::kYaw) + x(E::kOmega) * dt) - std::sin(x(E::kYaw)));
     const double ey = x(E::kY) - R * (std::cos(x(E::kYaw) + x(E::kOmega) * dt) - std::cos(x(E::kYaw)));
@@ -238,7 +272,7 @@ TEST(VehicleEkf, ArcIntegrationIsExact)
   a(E::kYaw) = 0.3; a(E::kV) = 1.0; a(E::kOmega) = 1e-9;
   VS b = a;
   b(E::kOmega) = 0.0;
-  EXPECT_LT((VehicleEkf::propagate(a, 0.1) - VehicleEkf::propagate(b, 0.1)).head<2>().norm(), 1e-9)
+  EXPECT_LT((EkfCore::propagate(a, 0.1) - EkfCore::propagate(b, 0.1)).head<2>().norm(), 1e-9)
     << "omega → 0 で直線に連続（分岐なし）";
 
   // 傾斜：水平速度は v cos(pitch)、z は -v sin(pitch)（上り坂は pitch < 0）
@@ -246,14 +280,14 @@ TEST(VehicleEkf, ArcIntegrationIsExact)
   const double th = -std::atan(1.0 / 12.0);
   c(E::kPitch) = th;
   const double dt = 0.5;
-  const VS cn = VehicleEkf::propagate(c, dt), xn = VehicleEkf::propagate(x, dt);
+  const VS cn = EkfCore::propagate(c, dt), xn = EkfCore::propagate(x, dt);
   const double flat = std::hypot(xn(E::kX) - x(E::kX), xn(E::kY) - x(E::kY));
   EXPECT_NEAR(std::hypot(cn(E::kX) - c(E::kX), cn(E::kY) - c(E::kY)), flat * std::cos(th), 1e-12);
   EXPECT_NEAR(cn(E::kZ) - c(E::kZ), -c(E::kV) * std::sin(th) * dt, 1e-12);
   EXPECT_GT(cn(E::kZ), c(E::kZ)) << "上り坂で z が増える";
 }
 
-TEST(VehicleEkf, TransitionJacobianMatchesNumerical)
+TEST(EkfCore, TransitionJacobianMatchesNumerical)
 {
   for (double w : {0.8, 1e-5, 0.0, -1.3}) {
     for (double th : {0.0, 0.2, -0.08}) {
@@ -261,28 +295,31 @@ TEST(VehicleEkf, TransitionJacobianMatchesNumerical)
       x << 1.0, -2.0, 0.5, 0.05, th, 2.9, 0.9, w;
       const double dt = 0.15, h = 1e-6;
       MS Fn;
-      for (int j = 0; j < VehicleEkf::kN; ++j) {
+      for (int j = 0; j < EkfCore::kN; ++j) {
         VS xp = x, xm = x;
         xp(j) += h; xm(j) -= h;
-        VS d = VehicleEkf::propagate(xp, dt) - VehicleEkf::propagate(xm, dt);
-        d(VehicleEkf::kYaw) = normalizeAngle(d(VehicleEkf::kYaw));
+        VS d = EkfCore::propagate(xp, dt) - EkfCore::propagate(xm, dt);
+        d(EkfCore::kYaw) = normalizeAngle(d(EkfCore::kYaw));
         Fn.col(j) = d / (2 * h);
       }
-      const MS Fa = VehicleEkf::transitionJacobian(x, dt);
+      const MS Fa = EkfCore::transitionJacobian(x, dt);
       EXPECT_LT((Fa - Fn).cwiseAbs().maxCoeff(), 1e-6) << "omega=" << w << " pitch=" << th;
     }
   }
 }
 
-TEST(VehicleEkf, ObservationJacobianMatchesAnalytic)
+// ===========================================================================
+// NdtModel（NDT のみ）
+// ===========================================================================
+
+TEST(NdtModel, ObservationJacobianMatchesAnalytic)
 {
   // 数値微分の H の位置部分を解析式と照合する：p_L = p_b + R(roll, pitch, yaw) o
   const auto p = P0();
-  VehicleEkf ekf;
-  ekf.setParams(p);
+  Rig rig = makeRig(p, false);
   VS x;
   x << 1.0, -2.0, 0.3, 0.07, -0.12, 2.9, 0.9, 0.3;
-  const auto H = ekf.observationJacobian(x);
+  const auto H = rig.ndt->observationJacobian(x);
   const double r = x(3), pt = x(4), y = x(5);
   const Eigen::Vector3d o(p.o_x, p.o_y, p.o_z);
   const auto skew = [](const Eigen::Vector3d & a) {
@@ -303,23 +340,23 @@ TEST(VehicleEkf, ObservationJacobianMatchesAnalytic)
   // 水平面（roll = pitch = 0）では旧 5 状態モデルの H と一致する
   VS xf = x;
   xf(3) = 0.0; xf(4) = 0.0;
-  const auto Hf = ekf.observationJacobian(xf);
+  const auto Hf = rig.ndt->observationJacobian(xf);
   const double c = std::cos(y), s = std::sin(y);
   EXPECT_NEAR(Hf(0, 5), -p.o_x * s - p.o_y * c, 1e-8);
   EXPECT_NEAR(Hf(1, 5), p.o_x * c - p.o_y * s, 1e-8);
   EXPECT_NEAR(Hf(5, 5), 1.0, 1e-8);
 }
 
-TEST(VehicleEkf, RecoversBaseLinkWhileTurning)
+TEST(NdtModel, RecoversBaseLinkWhileTurning)
 {
   const auto p = P0();
-  VehicleEkf ekf;
-  ekf.setParams(p);
+  Rig rig = makeRig(p, false);
+  const EkfCore & ekf = rig.core;
   std::mt19937 rng(3);
   std::normal_distribution<double> np(0, 0.1), na(0, 0.07), nz(0, 0.1), nr(0, 0.03);
   double t = 1000, xb = 0, yb = 0, psib = 0.5;
   const double V = 0.8, W = 0.3, DT = 0.05;
-  ekf.initialize(lidarObs(p, xb, yb, psib), t);
+  rig.addNdt(lidarObs(p, xb, yb, psib), t);
   double se = 0, roll_sum = 0, pitch_sum = 0;
   int n = 0;
   for (int k = 0; k < 800; ++k) {
@@ -327,16 +364,15 @@ TEST(VehicleEkf, RecoversBaseLinkWhileTurning)
     xb += V / W * (std::sin(psib + W * DT) - std::sin(psib));
     yb -= V / W * (std::cos(psib + W * DT) - std::cos(psib));
     psib = normalizeAngle(psib + W * DT);
-    ekf.predictTo(t);
     V6 z = lidarObs(p, xb, yb, psib);
     z(0) += np(rng); z(1) += np(rng); z(2) += nz(rng); z(3) += nr(rng); z(4) += nr(rng);
     z(5) += na(rng);
-    ekf.update(z);
+    rig.addNdt(z, t);
     if (k > 300) {
       const auto b = ekf.basePose().translation();
       se += std::hypot(b.x() - xb, b.y() - yb);
-      roll_sum += ekf.state()(VehicleEkf::kRoll);
-      pitch_sum += ekf.state()(VehicleEkf::kPitch);
+      roll_sum += ekf.state()(EkfCore::kRoll);
+      pitch_sum += ekf.state()(EkfCore::kPitch);
       ++n;
     }
   }
@@ -350,105 +386,99 @@ TEST(VehicleEkf, RecoversBaseLinkWhileTurning)
   EXPECT_TRUE(psdOK(ekf.covariance()));
 }
 
-TEST(VehicleEkf, OnlyZRejectedWhenZJumps)
+TEST(NdtModel, OnlyZRejectedWhenZJumps)
 {
   const auto p = P0();
-  VehicleEkf ekf;
-  ekf.setParams(p);
+  Rig rig = makeRig(p, false);
   double t = 1000;
-  ekf.initialize(lidarObs(p, 0, 0, 0), t);
-  for (int k = 0; k < 100; ++k) {t += 0.05; ekf.predictTo(t); ekf.update(lidarObs(p, 0, 0, 0));}
-  const double z_before = ekf.lidarPose().translation().z();
+  rig.addNdt(lidarObs(p, 0, 0, 0), t);
+  for (int k = 0; k < 100; ++k) {t += 0.05; rig.addNdt(lidarObs(p, 0, 0, 0), t);}
+  const double z_before = lidarPose(rig).translation().z();
   t += 0.05;
-  ekf.predictTo(t);
   V6 bad = lidarObs(p, 0, 0, 0);
   bad(2) += 0.8;
-  const auto r = ekf.update(bad);
-  EXPECT_TRUE(r.horizontal_accepted);
-  EXPECT_EQ(r.z, SR::kRejected);
-  EXPECT_EQ(r.roll, SR::kUpdated);
-  EXPECT_EQ(r.pitch, SR::kUpdated);
-  EXPECT_EQ(ekf.zGate().reject_count, 1);
+  const auto r = rig.updateNdt(bad, t);
+  EXPECT_EQ(r[NdtModel::kHorizontal].status, SR::kUpdated);
+  EXPECT_EQ(r[NdtModel::kStageZ].status, SR::kRejected);
+  EXPECT_EQ(r[NdtModel::kStageRoll].status, SR::kUpdated);
+  EXPECT_EQ(r[NdtModel::kStagePitch].status, SR::kUpdated);
+  EXPECT_EQ(rig.ndt->gate(rig.core, NdtModel::kStageZ).reject_count, 1);
   // 観測が予測と一致している roll, pitch の更新では状態は動かない
-  EXPECT_NEAR(ekf.lidarPose().translation().z(), z_before, 1e-9);
+  EXPECT_NEAR(lidarPose(rig).translation().z(), z_before, 1e-9);
 }
 
-TEST(VehicleEkf, LockoutReinitializesAfterStep)
+TEST(NdtModel, LockoutReinitializesAfterStep)
 {
   auto p = P0();
-  p.lockout_count = 10;
-  VehicleEkf ekf;
-  ekf.setParams(p);
+  p.ndt.lockout_count = 10;
+  Rig rig = makeRig(p, false);
   double t = 1000;
-  ekf.initialize(lidarObs(p, 0, 0, 0), t);
-  for (int k = 0; k < 100; ++k) {t += 0.05; ekf.predictTo(t); ekf.update(lidarObs(p, 0, 0, 0));}
+  rig.addNdt(lidarObs(p, 0, 0, 0), t);
+  for (int k = 0; k < 100; ++k) {t += 0.05; rig.addNdt(lidarObs(p, 0, 0, 0), t);}
   int reinit_at = -1;
   for (int k = 1; k <= 30; ++k) {
     t += 0.05;
-    ekf.predictTo(t);
     V6 zz = lidarObs(p, 0, 0, 0);
     zz(2) += 0.8;
-    const auto r = ekf.update(zz);
-    if (reinit_at < 0 && r.z == SR::kReinitialized) {reinit_at = k;}
+    const auto r = rig.updateNdt(zz, t);
+    if (reinit_at < 0 && r[NdtModel::kStageZ].status == SR::kReinitialized) {reinit_at = k;}
   }
   EXPECT_EQ(reinit_at, 10);
-  EXPECT_NEAR(ekf.lidarPose().translation().z(), p.o_z + 0.8, 0.05);
-  EXPECT_TRUE(psdOK(ekf.covariance()));
+  EXPECT_NEAR(lidarPose(rig).translation().z(), p.o_z + 0.8, 0.05);
+  EXPECT_TRUE(psdOK(rig.core.covariance()));
 }
 
-TEST(VehicleEkf, ScalarsIndependentOfHorizontalGate)
+TEST(NdtModel, ScalarsIndependentOfHorizontalGate)
 {
   const auto p = P0();
-  VehicleEkf ekf;
-  ekf.setParams(p);
+  Rig rig = makeRig(p, false);
   double t = 1000;
-  ekf.initialize(lidarObs(p, 0, 0, 0), t);
-  for (int k = 0; k < 100; ++k) {t += 0.05; ekf.predictTo(t); ekf.update(lidarObs(p, 0, 0, 0));}
+  rig.addNdt(lidarObs(p, 0, 0, 0), t);
+  for (int k = 0; k < 100; ++k) {t += 0.05; rig.addNdt(lidarObs(p, 0, 0, 0), t);}
   t += 0.05;
-  ekf.predictTo(t);
+  rig.core.predictTo(t);
   V6 zz = lidarObs(p, 3.0, 0, 0);
   zz(4) += 0.02;
-  const double pitch_before = rpyOf(ekf.lidarPose().linear())(1);
-  const auto r = ekf.update(zz);
-  EXPECT_FALSE(r.horizontal_accepted);
-  EXPECT_EQ(r.pitch, SR::kUpdated);
-  EXPECT_GT(rpyOf(ekf.lidarPose().linear())(1), pitch_before + 1e-4);
+  const double pitch_before = rpyOf(lidarPose(rig).linear())(1);
+  const auto r = rig.updateNdt(zz, t);
+  EXPECT_EQ(r[NdtModel::kHorizontal].status, SR::kRejected);
+  EXPECT_EQ(r[NdtModel::kStagePitch].status, SR::kUpdated);
+  EXPECT_GT(rpyOf(lidarPose(rig).linear())(1), pitch_before + 1e-4);
 }
 
-TEST(VehicleEkf, StaticTfConsistent)
+TEST(NdtModel, StaticTfConsistent)
 {
   const auto p = P0();
-  VehicleEkf ekf;
-  ekf.setParams(p);
-  ekf.initialize(lidarObs(p, 4.0, -1.0, 1.1), 0.0);
-  const Eigen::Affine3d d = ekf.lidarPose().inverse() * (ekf.basePose() * ekf.mountTransform());
+  Rig rig = makeRig(p, false);
+  rig.addNdt(lidarObs(p, 4.0, -1.0, 1.1), 0.0);
+  const Eigen::Affine3d d =
+    lidarPose(rig).inverse() * (rig.core.basePose() * rig.ndt->mountTransform());
   EXPECT_LT((d.matrix() - Eigen::Matrix4d::Identity()).cwiseAbs().maxCoeff(), 1e-12);
-  const Eigen::Vector3d bt = ekf.basePose().translation();
-  EXPECT_LT(std::hypot(bt.x() - ekf.state()(0), bt.y() - ekf.state()(1)), 1e-9);
+  const Eigen::Vector3d bt = rig.core.basePose().translation();
+  EXPECT_LT(std::hypot(bt.x() - rig.core.state()(0), bt.y() - rig.core.state()(1)), 1e-9);
 }
 
-TEST(VehicleEkf, InitializeRoundTrip)
+TEST(NdtModel, InitializeRoundTrip)
 {
   // roll, pitch, 取付回転がすべて 0 でない LiDAR 姿勢で初期化し、lidarPose() が観測に戻る
   const auto p = P0();
-  VehicleEkf ekf;
-  ekf.setParams(p);
+  Rig rig = makeRig(p, false);
   const Eigen::Affine3d T_mb = makePose(3.0, -1.0, 0.4, 0.05, -0.08, 2.0);
-  const V6 z = lidarObs3d(ekf, T_mb);
-  ekf.initialize(z, 0.0);
-  const V6 back = poseVec(ekf.lidarPose());
+  const V6 z = lidarObs3d(*rig.ndt, T_mb);
+  EXPECT_TRUE(rig.addNdt(z, 0.0).initialized_now);
+  const V6 back = poseVec(lidarPose(rig));
   V6 d = back - z;
   for (int i = 3; i < 6; ++i) {d(i) = normalizeAngle(d(i));}
   EXPECT_LT(d.cwiseAbs().maxCoeff(), 1e-9);
-  EXPECT_LT((ekf.state().head<6>() - poseVec(T_mb)).cwiseAbs().maxCoeff(), 1e-9)
+  EXPECT_LT((rig.core.state().head<6>() - poseVec(T_mb)).cwiseAbs().maxCoeff(), 1e-9)
     << "状態は base_link の姿勢";
-  EXPECT_TRUE(psdOK(ekf.covariance()));
+  EXPECT_TRUE(psdOK(rig.core.covariance()));
   // 初期共分散は P_init の対角
-  EXPECT_LT((ekf.covariance() - MS(p.p_init.asDiagonal())).cwiseAbs().maxCoeff(), 1e-15);
+  EXPECT_LT((rig.core.covariance() - MS(p.core.p_init.asDiagonal())).cwiseAbs().maxCoeff(), 1e-15);
 }
 
 // ---------------------------------------------------------------------------
-// 傾斜（docs/ekf_3d_plan.md 3.2 節）。1/12 勾配を 1 m/s で直進して登る
+// 傾斜。1/12 勾配を 1 m/s で直進して登る
 // ---------------------------------------------------------------------------
 namespace
 {
@@ -465,9 +495,9 @@ struct SlopeResult
 SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0)
 {
   auto p = P0();
-  p.r_ndt << 1e-2, 1e-2, 1e-2, 1e-4, 1e-4, 1e-3;
-  VehicleEkf ekf;
-  ekf.setParams(p);
+  p.ndt.r << 1e-2, 1e-2, 1e-2, 1e-4, 1e-4, 1e-3;
+  Rig rig = makeRig(p, false);
+  EkfCore & ekf = rig.core;
   std::mt19937 rng(11);
   std::normal_distribution<double> n01(0.0, 1.0);
 
@@ -495,8 +525,7 @@ SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0)
     const double tr = k * DT, t = t0 + tr;
     const Eigen::Affine3d T = truth(tr);
     if (k % 4 == 0 && (ndt_off_from < 0 || tr < ndt_off_from)) {
-      const V6 z = noisy(lidarObs3d(ekf, T));
-      if (!ekf.initialized()) {ekf.initialize(z, t);} else {ekf.predictTo(t); ekf.update(z);}
+      rig.addNdt(noisy(lidarObs3d(*rig.ndt, T)), t);
     }
     if (!ekf.initialized()) {continue;}
     ekf.predictTo(t);
@@ -504,7 +533,7 @@ SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0)
     if (tr > 5.0 && (ndt_off_from < 0 || tr < ndt_off_from)) {
       sum += e.head<2>();
       sq += e.head<2>().squaredNorm();
-      pitch_err += ekf.state()(VehicleEkf::kPitch) + slope;
+      pitch_err += ekf.state()(EkfCore::kPitch) + slope;
       ++n;
     }
     res.z_err_end = std::abs(e.z());
@@ -517,7 +546,7 @@ SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0)
 
 }  // namespace
 
-TEST(VehicleEkf, SlopeHasNoLeverArmBias)
+TEST(NdtModel, SlopeHasNoLeverArmBias)
 {
   // 旧 5 状態モデル（水平面仮定の h）では状態 x_b, y_b に o_z sin(slope) ≈ 10 cm のバイアスが乗った
   const auto clean = runSlope(15.0, -1.0, 0.0);
@@ -532,7 +561,7 @@ TEST(VehicleEkf, SlopeHasNoLeverArmBias)
   EXPECT_LT(noisy.rms_xy, 0.1) << "観測ノイズ（各軸 sd 0.1 m）より小さい";
 }
 
-TEST(VehicleEkf, SlopeZFollowsDuringNdtOutage)
+TEST(NdtModel, SlopeZFollowsDuringNdtOutage)
 {
   // 10 s から 2 s 欠測。z 一定の予測なら v sin(slope) * 2 s = 0.17 m ずれる
   const auto r = runSlope(12.0, 10.0);
@@ -541,56 +570,57 @@ TEST(VehicleEkf, SlopeZFollowsDuringNdtOutage)
 }
 
 // ===========================================================================
-// VehicleOdomEkf（NDT ＋ オドメトリ観測）。docs/ekf_odom_plan.md 4.1 節
+// OdomModel（NDT ＋ オドメトリ観測）
 // ===========================================================================
 
-TEST(VehicleOdomEkf, UpdateMatchesGenericKalmanWithH)
+TEST(OdomModel, UpdateMatchesGenericKalmanWithH)
 {
-  // updateOdom が一般形の KF 更新（h = [v, omega]）と一致するか
+  // オドメトリの更新が一般形の KF 更新（h = [v, omega]）と一致するか
   const auto p = P0();
-  VehicleOdomEkf ekf = makeOdomEkf(p);
-  ekf.initialize(lidarObs(p, 1.0, 2.0, 0.4), 10.0);
+  Rig rig = makeRig(p, true);
+  rig.addNdt(lidarObs(p, 1.0, 2.0, 0.4), 10.0);
   // 非対角が埋まった P を作る
   double t = 10.0;
   for (int k = 0; k < 20; ++k) {
     t += 0.05;
-    ekf.predictTo(t);
-    ekf.update(lidarObs(p, 1.0 + 0.05 * k, 2.0, 0.4));
-    ekf.updateOdom(1.0, 1.0, Eigen::Vector2d(2.5e-3, 5.0e-3), t);
+    rig.addNdt(lidarObs(p, 1.0 + 0.05 * k, 2.0, 0.4), t);
+    rig.addOdom(1.0, 1.0, Eigen::Vector2d(2.5e-3, 5.0e-3), t);
   }
-  const VS x0 = ekf.state();
-  const MS P = ekf.covariance();
-  ASSERT_GT(std::abs(P(VehicleEkf::kX, VehicleEkf::kV)), 1e-8);
+  const VS x0 = rig.core.state();
+  const MS P = rig.core.covariance();
+  ASSERT_GT(std::abs(P(EkfCore::kX, EkfCore::kV)), 1e-8);
   const Eigen::Vector2d z(0.9, 1.1), r(2.5e-3, 5.0e-3);
 
-  constexpr int N = VehicleEkf::kN;
+  constexpr int N = EkfCore::kN;
   Eigen::Matrix<double, 2, N> H = Eigen::Matrix<double, 2, N>::Zero();
-  H(0, VehicleEkf::kV) = 1.0;
-  H(1, VehicleEkf::kOmega) = 1.0;
-  const Eigen::Vector2d y = z - Eigen::Vector2d(x0(VehicleEkf::kV), x0(VehicleEkf::kOmega));
+  H(0, EkfCore::kV) = 1.0;
+  H(1, EkfCore::kOmega) = 1.0;
+  const Eigen::Vector2d y = z - Eigen::Vector2d(x0(EkfCore::kV), x0(EkfCore::kOmega));
   const Eigen::Matrix2d R = r.asDiagonal();
   const Eigen::Matrix2d S = H * P * H.transpose() + R;
   const Eigen::Matrix<double, N, 2> K = P * H.transpose() * S.inverse();
   VS x_exp = x0 + K * y;
-  for (int i = VehicleEkf::kRoll; i <= VehicleEkf::kYaw; ++i) {x_exp(i) = normalizeAngle(x_exp(i));}
+  for (int i = EkfCore::kRoll; i <= EkfCore::kYaw; ++i) {x_exp(i) = normalizeAngle(x_exp(i));}
   const MS IKH = MS::Identity() - K * H;
   const MS P_exp = IKH * P * IKH.transpose() + K * R * K.transpose();
 
-  ASSERT_TRUE(ekf.updateOdom(z(0), z(1), r, t));
-  EXPECT_LT((ekf.state() - x_exp).cwiseAbs().maxCoeff(), 1e-12);
-  EXPECT_LT((ekf.covariance() - P_exp).cwiseAbs().maxCoeff(), 1e-12);
-  EXPECT_NEAR(ekf.lastOdomMahalanobis(), y.dot(S.inverse() * y), 1e-9);
+  // 同時刻なので予測は入らない
+  const Outcome o = rig.addOdom(z(0), z(1), r, t);
+  ASSERT_EQ(o.stages.at(0).status, SR::kUpdated);
+  EXPECT_LT((rig.core.state() - x_exp).cwiseAbs().maxCoeff(), 1e-12);
+  EXPECT_LT((rig.core.covariance() - P_exp).cwiseAbs().maxCoeff(), 1e-12);
+  EXPECT_NEAR(o.stages.at(0).d2, y.dot(S.inverse() * y), 1e-9);
 }
 
-TEST(VehicleOdomEkf, LowerVelocityNoiseThanNdtOnly)
+TEST(OdomModel, LowerVelocityNoiseThanNdtOnly)
 {
   SimConfig cfg;
   cfg.motion = [](double, double & v, double & w) {v = 1.0; w = 0.0;};
-  VehicleEkf ndt_only;
-  ndt_only.setParams(P0());
-  VehicleOdomEkf odom = makeOdomEkf();
-  const auto r0 = simulate(ndt_only, nullptr, cfg);
-  const auto r1 = simulate(odom, &odom, cfg);
+  const auto p = P0();
+  Rig ndt_only = makeRig(p, false);
+  Rig odom = makeRig(p, true);
+  const auto r0 = simulate(ndt_only, cfg, p);
+  const auto r1 = simulate(odom, cfg, p);
 
   const auto ev = [](const Sample & s) {return s.v_est - s.v_true;};
   const auto ew = [](const Sample & s) {return s.w_est - s.w_true;};
@@ -605,18 +635,18 @@ TEST(VehicleOdomEkf, LowerVelocityNoiseThanNdtOnly)
   EXPECT_TRUE(r1.psd_always);
 }
 
-TEST(VehicleOdomEkf, CoastsThroughNdtOutage)
+TEST(OdomModel, CoastsThroughNdtOutage)
 {
   // 5〜7 s に NDT が欠測し、その間に真値は左旋回を始める
   SimConfig cfg;
   cfg.duration = 7.0;
   cfg.motion = [](double t, double & v, double & w) {v = 1.0; w = (t >= 5.0) ? 0.5 : 0.0;};
   cfg.ndt_on = [](double t) {return t < 5.0;};
-  VehicleEkf ndt_only;
-  ndt_only.setParams(P0());
-  VehicleOdomEkf odom = makeOdomEkf();
-  const auto r0 = simulate(ndt_only, nullptr, cfg);
-  const auto r1 = simulate(odom, &odom, cfg);
+  const auto p = P0();
+  Rig ndt_only = makeRig(p, false);
+  Rig odom = makeRig(p, true);
+  const auto r0 = simulate(ndt_only, cfg, p);
+  const auto r1 = simulate(odom, cfg, p);
   const double e0 = r0.samples.back().err_pos, e1 = r1.samples.back().err_pos;
   std::printf("  2 s 欠測後の位置誤差: ndt_only %.3f m  ndt_odom %.3f m\n", e0, e1);
   EXPECT_LT(e1, 0.3 * e0);
@@ -624,22 +654,21 @@ TEST(VehicleOdomEkf, CoastsThroughNdtOutage)
   EXPECT_TRUE(r1.psd_always);
 }
 
-TEST(VehicleOdomEkf, SlipFollowsOdomUnlessROdomIsLarge)
+TEST(OdomModel, SlipFollowsOdomUnlessROdomIsLarge)
 {
   // オドメトリが真値より 10% 大きい（スリップ・スケール誤差）。
   // 【既知の制約】オドメトリは v を直接・高頻度で観測するのに対し、NDT は位置を介した間接情報なので、
   // R_odom が小さいと推定 v はほぼオドメトリに張り付く（NDT とのずれは Q_pose の位置ノイズとして吸収される）。
-  // スケール誤差を NDT で補正するには係数を状態に入れる必要がある（計画書 段階 5）。
+  // スケール誤差を NDT で補正するには係数を状態に入れる必要がある。
   SimConfig cfg;
   cfg.duration = 30.0;
   cfg.motion = [](double, double & v, double & w) {v = 1.0; w = 0.0;};
   cfg.odom_corrupt = [](double, double & v, double &) {v *= 1.1;};
   const auto run = [&](double r_v) {
-      VehicleOdomEkf ekf = makeOdomEkf();
-      VehicleOdomEkf::OdomParams op;
-      op.r_odom(0) = r_v;
-      ekf.setOdomParams(op);
-      const auto r = simulate(ekf, &ekf, cfg);
+      auto p = P0();
+      p.odom.r(0) = r_v;
+      Rig rig = makeRig(p, true);
+      const auto r = simulate(rig, cfg, p);
       return meanOver(r, 10, 30, [](const Sample & s) {return s.v_est;});
     };
   const double v_small = run(2.5e-3), v_large = run(2.5e-1);
@@ -649,23 +678,25 @@ TEST(VehicleOdomEkf, SlipFollowsOdomUnlessROdomIsLarge)
   EXPECT_GT(v_large, 0.98);
 }
 
-TEST(VehicleOdomEkf, SingleOutlierRejected)
+TEST(OdomModel, SingleOutlierRejected)
 {
   SimConfig cfg;
   cfg.duration = 10.0;
-  VehicleOdomEkf ekf = makeOdomEkf();
-  simulate(ekf, &ekf, cfg);
-  const VS x_before = ekf.state();
-  const MS P_before = ekf.covariance();
-  // updateOdom は予測しないので、更新の有無だけが見える
-  EXPECT_FALSE(ekf.updateOdom(3.0, 0.0, Eigen::Vector2d(2.5e-3, 5.0e-3), ekf.lastStamp()));
-  EXPECT_GT(ekf.lastOdomMahalanobis(), 9.21);
-  EXPECT_EQ(ekf.odomRejectCount(), 1);
-  EXPECT_TRUE(ekf.state() == x_before) << "外れ値で状態が動かない";
-  EXPECT_TRUE(ekf.covariance() == P_before);
+  const auto p = P0();
+  Rig rig = makeRig(p, true);
+  simulate(rig, cfg, p);
+  const VS x_before = rig.core.state();
+  const MS P_before = rig.core.covariance();
+  // 状態と同じ時刻に入れるので予測は入らず、更新の有無だけが見える
+  const Outcome o = rig.addOdom(3.0, 0.0, Eigen::Vector2d(2.5e-3, 5.0e-3), rig.core.lastStamp());
+  EXPECT_EQ(o.stages.at(0).status, SR::kRejected);
+  EXPECT_GT(o.stages.at(0).d2, 9.21);
+  EXPECT_EQ(rig.odom->gate(rig.core).reject_count, 1);
+  EXPECT_TRUE(rig.core.state() == x_before) << "外れ値で状態が動かない";
+  EXPECT_TRUE(rig.core.covariance() == P_before);
 }
 
-TEST(VehicleOdomEkf, WrongOmegaSignIsNotCaughtByOdomGate)
+TEST(OdomModel, WrongOmegaSignIsNotCaughtByOdomGate)
 {
   // 左旋回中にオドメトリの omega の符号が逆。
   // 【既知の制約】オドメトリのゲートでは検出できない。omega の推定はオドメトリに引きずられて符号が逆になり、
@@ -675,8 +706,9 @@ TEST(VehicleOdomEkf, WrongOmegaSignIsNotCaughtByOdomGate)
   cfg.duration = 20.0;
   cfg.motion = [](double, double & v, double & w) {v = 0.5; w = 0.5;};
   cfg.odom_corrupt = [](double, double &, double & w) {w = -w;};
-  VehicleOdomEkf ekf = makeOdomEkf();
-  const auto r = simulate(ekf, &ekf, cfg);
+  const auto p = P0();
+  Rig rig = makeRig(p, true);
+  const auto r = simulate(rig, cfg, p);
   const double rate = static_cast<double>(r.odom_rejects) / r.odom_updates;
   const double w_est = meanOver(r, 10, 20, [](const Sample & s) {return s.w_est;});
   const double pos = rmsOver(r, 10, 20, [](const Sample & s) {return s.err_pos;});
@@ -687,18 +719,18 @@ TEST(VehicleOdomEkf, WrongOmegaSignIsNotCaughtByOdomGate)
   EXPECT_LT(pos, 0.15) << "位置は NDT で保たれる";
 }
 
-TEST(VehicleOdomEkf, OdomDropoutFallsBackToNdtOnly)
+TEST(OdomModel, OdomDropoutFallsBackToNdtOnly)
 {
   // 5 s 以降オドメトリが止まる
   SimConfig cfg;
   cfg.duration = 20.0;
   cfg.motion = [](double t, double & v, double & w) {v = 0.8; w = (t > 10.0) ? 0.3 : 0.0;};
   cfg.odom_on = [](double t) {return t < 5.0;};
-  VehicleOdomEkf ekf = makeOdomEkf();
-  VehicleEkf ndt_only;
-  ndt_only.setParams(P0());
-  const auto r1 = simulate(ekf, &ekf, cfg);
-  const auto r0 = simulate(ndt_only, nullptr, cfg);
+  const auto p = P0();
+  Rig odom = makeRig(p, true);
+  Rig ndt_only = makeRig(p, false);
+  const auto r1 = simulate(odom, cfg, p);
+  const auto r0 = simulate(ndt_only, cfg, p);
   const auto ep = [](const Sample & s) {return s.err_pos;};
   const double e1 = rmsOver(r1, 12, 20, ep), e0 = rmsOver(r0, 12, 20, ep);
   std::printf("  odom 途絶後の位置誤差 rms: ndt_odom %.3f  ndt_only %.3f\n", e1, e0);
@@ -707,33 +739,33 @@ TEST(VehicleOdomEkf, OdomDropoutFallsBackToNdtOnly)
   EXPECT_NEAR(r1.samples.back().w_est, 0.3, 0.1);
 }
 
-TEST(VehicleOdomEkf, InitializesVelocityFromRecentOdom)
+TEST(OdomModel, InitializesVelocityFromRecentOdom)
 {
   const auto p = P0();
   const Eigen::Vector2d r(2.5e-3, 5.0e-3);
 
-  VehicleOdomEkf recent = makeOdomEkf(p);
-  EXPECT_FALSE(recent.updateOdom(0.8, 0.2, r, 99.9));   // 未初期化：記録だけ
-  recent.initialize(lidarObs(p, 0, 0, 0), 100.0);
-  EXPECT_TRUE(recent.initializedFromOdom());
-  EXPECT_DOUBLE_EQ(recent.velocity(), 0.8);
-  EXPECT_DOUBLE_EQ(recent.angularVelocity(), 0.2);
-  EXPECT_DOUBLE_EQ(recent.covariance()(VehicleEkf::kV, VehicleEkf::kV), r(0));
-  EXPECT_DOUBLE_EQ(recent.covariance()(VehicleEkf::kOmega, VehicleEkf::kOmega), r(1));
+  Rig recent = makeRig(p, true);
+  const Outcome o = recent.addOdom(0.8, 0.2, r, 99.9);   // 未初期化：覚えるだけ
+  EXPECT_FALSE(o.was_initialized);
+  EXPECT_TRUE(o.stages.empty());
+  EXPECT_FALSE(recent.core.initialized());
+  EXPECT_TRUE(recent.addNdt(lidarObs(p, 0, 0, 0), 100.0).aided);
+  EXPECT_DOUBLE_EQ(recent.core.velocity(), 0.8);
+  EXPECT_DOUBLE_EQ(recent.core.angularVelocity(), 0.2);
+  EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kV, EkfCore::kV), r(0));
+  EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kOmega, EkfCore::kOmega), r(1));
 
-  VehicleOdomEkf stale = makeOdomEkf(p);
-  stale.updateOdom(0.8, 0.2, r, 99.0);   // 1 s 前は odom_timeout_init(0.2) を超える
-  stale.initialize(lidarObs(p, 0, 0, 0), 100.0);
-  EXPECT_FALSE(stale.initializedFromOdom());
-  EXPECT_DOUBLE_EQ(stale.velocity(), 0.0);
+  Rig stale = makeRig(p, true);
+  stale.addOdom(0.8, 0.2, r, 99.0);   // 1 s 前は odom_timeout_init(0.2) を超える
+  EXPECT_FALSE(stale.addNdt(lidarObs(p, 0, 0, 0), 100.0).aided);
+  EXPECT_DOUBLE_EQ(stale.core.velocity(), 0.0);
   EXPECT_DOUBLE_EQ(
-    stale.covariance()(VehicleEkf::kV, VehicleEkf::kV), p.p_init(VehicleEkf::kV));
+    stale.core.covariance()(EkfCore::kV, EkfCore::kV), p.core.p_init(EkfCore::kV));
 
   // reset 後も直近のオドメトリで初期化し直せる（初期姿勢の再設定）
-  recent.reset();
-  EXPECT_FALSE(recent.initialized());
-  recent.updateOdom(0.5, -0.1, r, 105.0);
-  recent.initialize(lidarObs(p, 0, 0, 0), 105.05);
-  EXPECT_TRUE(recent.initializedFromOdom());
-  EXPECT_DOUBLE_EQ(recent.velocity(), 0.5);
+  recent.core.reset();
+  EXPECT_FALSE(recent.core.initialized());
+  recent.addOdom(0.5, -0.1, r, 105.0);
+  EXPECT_TRUE(recent.addNdt(lidarObs(p, 0, 0, 0), 105.05).aided);
+  EXPECT_DOUBLE_EQ(recent.core.velocity(), 0.5);
 }

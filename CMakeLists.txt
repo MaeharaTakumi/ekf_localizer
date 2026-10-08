@@ -24,8 +24,10 @@ find_package(tf2_geometry_msgs REQUIRED)
 
 # ROS に依存しない EKF 本体（ノードとテストで共用）
 add_library(ekf_core STATIC
-  src/vehicle_ekf.cpp
-  src/vehicle_odom_ekf.cpp
+  src/ekf_core.cpp
+  src/observation_model.cpp
+  src/ndt_model.cpp
+  src/odom_model.cpp
   src/lagged_ekf.cpp
 )
 target_include_directories(ekf_core PUBLIC
@@ -59,8 +61,8 @@ install(DIRECTORY param
 if(BUILD_TESTING)
   # EKF の単体テスト（ROS 非依存）。colcon test --packages-select ekf_localizer
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_vehicle_ekf test/test_vehicle_ekf.cpp)
-  target_link_libraries(test_vehicle_ekf ekf_core)
+  ament_add_gtest(test_ekf_models test/test_ekf_models.cpp)
+  target_link_libraries(test_ekf_models ekf_core)
   ament_add_gtest(test_lagged_ekf test/test_lagged_ekf.cpp)
   target_link_libraries(test_lagged_ekf ekf_core)
 endif()

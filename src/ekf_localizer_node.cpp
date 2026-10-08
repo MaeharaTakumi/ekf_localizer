@@ -74,20 +74,62 @@ bool EkfLocalizer::tryCreateFilter()
     return false;
   }
   const Eigen::Affine3d mount = tf2::transformToEigen(tf);
-  filter_ = std::make_unique<LaggedEkf>(createEkf(cfg_, mount), cfg_.history_length);
+  filter_ = createFilter(cfg_, mount);
 
-  const VehicleEkf::Params & p = filter_->current().params();
+  const Eigen::Vector3d t = mount.translation();
+  const Eigen::Vector3d rpy = rpyFromRotation(mount.linear());
   RCLCPP_INFO(
     get_logger(), "mount %s -> %s (from TF): t=[%.3f, %.3f, %.3f], rpy=[%.4f, %.4f, %.4f]",
     cfg_.base_frame_id.c_str(), cfg_.lidar_frame_id.c_str(),
-    p.o_x, p.o_y, p.o_z, p.roll_o, p.pitch_o, p.yaw_o);
+    t.x(), t.y(), t.z(), rpy(0), rpy(1), rpy(2));
   return true;
+}
+
+void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
+{
+  const ObservationModel & model = *m->model;
+  const LaggedEkf::Result r = filter_.lagged->add(m);
+
+  if (r.status == Status::kTooOld) {
+    const rclcpp::Time t_now = now();
+    const auto it = too_old_warned_.find(&model);
+    if (it == too_old_warned_.end() || (t_now - it->second).seconds() >= 5.0) {
+      RCLCPP_WARN(
+        get_logger(), "%s is older than the history (%.3f s behind the latest). "
+        "Increase history_length.", model.name(), filter_.lagged->latestStamp() - m->stamp);
+      too_old_warned_.insert_or_assign(&model, t_now);
+    }
+    return;
+  }
+
+  const Outcome & o = r.outcome;
+  if (o.initialized_now) {
+    const EkfCore & ekf = filter_.lagged->current();
+    const MeasurementPtr & aid = ekf.initAid();
+    RCLCPP_INFO(
+      get_logger(), "EKF initialized by %s (v, omega = %.3f, %.3f from %s).", model.name(),
+      ekf.velocity(), ekf.angularVelocity(), o.aided ? aid->model->name() : "zero");
+    return;
+  }
+
+  using S = StageResult::Status;
+  for (const StageResult & st : o.stages) {
+    if (st.status == S::kRejected) {
+      RCLCPP_WARN(
+        get_logger(), "%s %s rejected by gate (d2 = %lf, %d times in a row).",
+        model.name(), st.name, st.d2, st.reject_count);
+    } else if (st.status == S::kReinitialized) {
+      RCLCPP_WARN(
+        get_logger(), "%s %s: lockout -> reinitialized to the observation (%lf).",
+        model.name(), st.name, st.reinitialized_to);
+    }
+  }
 }
 
 void EkfLocalizer::ndtPoseReceived(
   const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg)
 {
-  if (!filter_) {return;}
+  if (!filter_.lagged) {return;}
 
   // NDT の解は map → LiDAR の姿勢。共分散は使わない（観測ノイズは R_ndt）
   const auto & p = msg->pose.pose;
@@ -95,59 +137,20 @@ void EkfLocalizer::ndtPoseReceived(
   tf2::Matrix3x3(
     tf2::Quaternion(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w))
   .getRPY(roll, pitch, yaw);
-  VehicleEkf::Vector6d z;
+  NdtModel::Vector6d z;
   z << p.position.x, p.position.y, p.position.z, roll, pitch, yaw;
 
   // 点群の取得時刻が stamp より ndt_delay だけ前のときに補う
   const double stamp =
     rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds() - cfg_.ndt_delay;
-  const LaggedEkf::NdtResult r = filter_->addNdt(z, stamp);
-
-  if (r.status == Status::kTooOld) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000,
-      "NDT pose is older than the history (%.3f s behind the latest). Increase history_length.",
-      filter_->latestStamp() - stamp);
-    return;
-  }
-
-  if (r.initialized) {
-    const auto * odom_ekf = dynamic_cast<const VehicleOdomEkf *>(&filter_->current());
-    RCLCPP_INFO(
-      get_logger(), "EKF initialized%s (v, omega = %.3f, %.3f).",
-      odom_ekf ? (odom_ekf->initializedFromOdom() ? " from odometry" : " with zero velocity") : "",
-      filter_->current().velocity(), filter_->current().angularVelocity());
-    return;
-  }
-
-  if (!r.update.horizontal_accepted) {
-    RCLCPP_WARN(
-      get_logger(), "NDT x/y/yaw rejected by gate (d2 = %lf, %d times in a row).",
-      r.horizontal_d2, r.horizontal_reject_count);
-  }
-  // obs は NDT が出した LiDAR の値（再初期化ではこの値に合わせる）
-  using R1 = VehicleEkf::ScalarResult;
-  const auto report = [this](const char * name, R1 res, const VehicleEkf::ScalarGate & gate,
-      double obs) {
-      if (res == R1::kRejected) {
-        RCLCPP_WARN(
-          get_logger(), "NDT %s rejected by gate (d2 = %lf, %d times in a row).",
-          name, gate.last_d2, gate.reject_count);
-      } else if (res == R1::kReinitialized) {
-        RCLCPP_WARN(
-          get_logger(), "NDT %s: lockout -> reinitialized to LiDAR %s = %lf.", name, name, obs);
-      }
-    };
-  report("z", r.update.z, r.z_gate, z(2));
-  report("roll", r.update.roll, r.roll_gate, z(3));
-  report("pitch", r.update.pitch, r.pitch_gate, z(4));
+  addMeasurement(filter_.ndt->measurement(z, stamp));
 }
 
 void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr msg)
 {
-  if (!filter_ || !filter_->usesOdom()) {return;}
+  if (!filter_.lagged || !filter_.odom) {return;}
 
-  Eigen::Vector2d r = cfg_.odom_params.r_odom;
+  Eigen::Vector2d r = cfg_.odom.r;
   if (cfg_.odom_covariance_source == "message") {
     // twist.covariance は 6x6 行優先。[0] が v_x、[35] が omega_z の分散
     const Eigen::Vector2d r_msg(msg->twist.covariance[0], msg->twist.covariance[35]);
@@ -166,46 +169,35 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
   // twist が表す動きは stamp より odom_delay だけ前のもの（diff_drive_controller の移動平均など）
   const double stamp =
     rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds() - cfg_.odom_delay;
-  const LaggedEkf::OdomResult res = filter_->addOdom(v, omega, r, stamp);
-
-  if (res.status == Status::kTooOld) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000,
-      "Odometry is older than the history (%.3f s behind the latest). Increase history_length.",
-      filter_->latestStamp() - stamp);
-  } else if (res.filter_initialized && !res.accepted) {
-    RCLCPP_WARN(
-      get_logger(), "Odometry v=%.3f omega=%.3f rejected by gate (d2 = %lf, %d times in a row).",
-      v, omega, res.d2, res.reject_count);
-  }
+  addMeasurement(filter_.odom->measurement(v, omega, r, stamp));
 }
 
 void EkfLocalizer::initialPoseReceived(
   const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg)
 {
   if (msg->header.frame_id != cfg_.map_frame_id) {return;}
-  if (!filter_) {return;}
+  if (!filter_.lagged) {return;}
   // 姿勢を与え直したので、次の NDT 観測で初期化し直す（ゲートに引っかかり続けるのを防ぐ）
-  filter_->reset();
+  filter_.lagged->reset();
   RCLCPP_INFO(get_logger(), "initialpose received: EKF reset.");
 }
 
 void EkfLocalizer::timerCallback()
 {
-  if (!filter_ && !tryCreateFilter()) {return;}
-  if (!filter_->initialized()) {return;}
+  if (!filter_.lagged && !tryCreateFilter()) {return;}
+  if (!filter_.lagged->initialized()) {return;}
 
   // 現在時刻まで予測して出す。オドメトリの stamp が現在時刻より先のこともある
   // （sim time の /clock が粗い場合）ので、そのときは最新の観測の時刻で出す
-  const double t = std::max(now().seconds(), filter_->current().lastStamp());
+  const double t = std::max(now().seconds(), filter_.lagged->current().lastStamp());
   const rclcpp::Time stamp = toTime(t);
   if (stamp <= last_publish_stamp_) {return;}
   last_publish_stamp_ = stamp;
 
-  publish(*filter_->predicted(t), stamp);
+  publish(filter_.lagged->predicted(t), stamp);
 }
 
-void EkfLocalizer::publish(const VehicleEkf & ekf, const rclcpp::Time & stamp)
+void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
 {
   const Eigen::Affine3d T_mb = ekf.basePose();
   const auto P6 = ekf.covariance().topLeftCorner<6, 6>();
@@ -223,8 +215,9 @@ void EkfLocalizer::publish(const VehicleEkf & ekf, const rclcpp::Time & stamp)
   geometry_msgs::msg::PoseWithCovarianceStamped pose;
   pose.header.stamp = stamp;
   pose.header.frame_id = cfg_.map_frame_id;
-  pose.pose.pose = tf2::toMsg(ekf.lidarPose());
-  const Eigen::Matrix<double, 6, 6> J = ekf.observationJacobian(ekf.state()).leftCols<6>();
+  pose.pose.pose = tf2::toMsg(filter_.ndt->lidarPose(ekf.state()));
+  const Eigen::Matrix<double, 6, 6> J =
+    filter_.ndt->observationJacobian(ekf.state()).leftCols<6>();
   Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(pose.pose.covariance.data()) =
     J * P6 * J.transpose();
   ekf_pose_pub_->publish(pose);
@@ -238,10 +231,10 @@ void EkfLocalizer::publish(const VehicleEkf & ekf, const rclcpp::Time & stamp)
   odom.twist.twist.linear.x = ekf.velocity();
   odom.twist.twist.angular.z = ekf.angularVelocity();
   const auto & P = ekf.covariance();
-  odom.twist.covariance[0] = P(VehicleEkf::kV, VehicleEkf::kV);
-  odom.twist.covariance[5] = P(VehicleEkf::kV, VehicleEkf::kOmega);
-  odom.twist.covariance[30] = P(VehicleEkf::kOmega, VehicleEkf::kV);
-  odom.twist.covariance[35] = P(VehicleEkf::kOmega, VehicleEkf::kOmega);
+  odom.twist.covariance[0] = P(EkfCore::kV, EkfCore::kV);
+  odom.twist.covariance[5] = P(EkfCore::kV, EkfCore::kOmega);
+  odom.twist.covariance[30] = P(EkfCore::kOmega, EkfCore::kV);
+  odom.twist.covariance[35] = P(EkfCore::kOmega, EkfCore::kOmega);
   ekf_odom_pub_->publish(odom);
 }
 

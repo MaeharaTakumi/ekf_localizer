@@ -10,11 +10,15 @@
 #include <vector>
 
 #include "ekf_localizer/lagged_ekf.hpp"
+#include "ekf_localizer/ndt_model.hpp"
+#include "ekf_localizer/odom_model.hpp"
 
+using ekf_localizer::applyMeasurement;
+using ekf_localizer::EkfCore;
 using ekf_localizer::LaggedEkf;
-using ekf_localizer::VehicleEkf;
-using ekf_localizer::VehicleOdomEkf;
-using V6 = VehicleEkf::Vector6d;
+using ekf_localizer::NdtModel;
+using ekf_localizer::OdomModel;
+using V6 = NdtModel::Vector6d;
 using Status = LaggedEkf::Status;
 
 namespace
@@ -25,22 +29,34 @@ constexpr double kV = 1.0;
 constexpr double kOmega = 0.2;
 const Eigen::Vector2d kROdom(2.5e-3, 5.0e-3);
 
-VehicleEkf::Params params()
+/// 取付 base → LiDAR
+Eigen::Affine3d mount()
 {
-  VehicleEkf::Params p;
-  p.o_x = -0.17; p.o_z = 1.2; p.yaw_o = -0.017;
-  p.q << 5e-2, 5e-2, 5e-3, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
-  p.r_ndt << 1e-2, 1e-2, 1e-2, 0.03, 0.03, 1e-3;
-  p.p_init << 2e-2, 2e-2, 2e-2, 0.06, 0.06, 2e-3, 1.0, 1.0;
-  return p;
+  Eigen::Affine3d T = Eigen::Affine3d::Identity();
+  T.linear() = Eigen::AngleAxisd(-0.017, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  T.translation() << -0.17, 0.0, 1.2;
+  return T;
 }
 
-std::unique_ptr<VehicleOdomEkf> makeOdomEkf()
+/// EKF 本体と観測モデル（use_odom が false ならオドメトリの観測モデルなし）
+struct Filter
 {
-  auto ekf = std::make_unique<VehicleOdomEkf>();
-  ekf->setParams(params());
-  ekf->reset();
-  return ekf;
+  EkfCore core;
+  std::shared_ptr<NdtModel> ndt;
+  std::shared_ptr<OdomModel> odom;
+};
+
+Filter makeFilter(bool use_odom = true)
+{
+  EkfCore::Params cp;
+  cp.q << 5e-2, 5e-2, 5e-3, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
+  cp.p_init << 2e-2, 2e-2, 2e-2, 0.06, 0.06, 2e-3, 1.0, 1.0;
+  NdtModel::Params np;
+  np.r << 1e-2, 1e-2, 1e-2, 0.03, 0.03, 1e-3;
+  Filter f{EkfCore(cp), nullptr, nullptr};
+  f.ndt = std::make_shared<NdtModel>(np, mount(), f.core);
+  if (use_odom) {f.odom = std::make_shared<OdomModel>(OdomModel::Params(), f.core);}
+  return f;
 }
 
 /// 等速円運動の真値（map → base）
@@ -80,10 +96,6 @@ std::vector<Meas> scenario(double ndt_delay, double duration = 2.0, unsigned see
 {
   std::mt19937 rng(seed);
   std::normal_distribution<double> n(0.0, 1.0);
-  VehicleEkf proto;
-  proto.setParams(params());
-  const Eigen::Affine3d mount = proto.mountTransform();
-
   std::vector<Meas> ms;
   for (int i = 0; i * 0.02 <= duration; ++i) {
     Meas m;
@@ -98,7 +110,7 @@ std::vector<Meas> scenario(double ndt_delay, double duration = 2.0, unsigned see
     m.ndt = true;
     m.stamp = kT0 + k * 0.1 + 0.005;
     m.arrival = m.stamp + ndt_delay;
-    m.z = poseVec(truth(m.stamp) * mount);
+    m.z = poseVec(truth(m.stamp) * mount());
     m.z(0) += 0.05 * n(rng);
     m.z(1) += 0.05 * n(rng);
     m.z(5) += 0.01 * n(rng);
@@ -107,42 +119,39 @@ std::vector<Meas> scenario(double ndt_delay, double duration = 2.0, unsigned see
   return ms;
 }
 
-/// 時刻順に並べ直して、普通の EKF にそのまま適用した結果（正解）
-std::unique_ptr<VehicleOdomEkf> runInOrder(std::vector<Meas> ms)
+ekf_localizer::MeasurementPtr toMeasurement(const Filter & f, const Meas & m)
+{
+  return m.ndt ? f.ndt->measurement(m.z, m.stamp) :
+         f.odom->measurement(m.v, m.omega, kROdom, m.stamp);
+}
+
+/// 時刻順に並べ直して、巻き戻しなしの EKF にそのまま適用した結果（正解）
+EkfCore runInOrder(std::vector<Meas> ms, bool use_odom = true)
 {
   std::stable_sort(
     ms.begin(), ms.end(), [](const Meas & a, const Meas & b) {return a.stamp < b.stamp;});
-  auto ekf = makeOdomEkf();
+  Filter f = makeFilter(use_odom);
   for (const Meas & m : ms) {
-    if (!m.ndt) {
-      ekf->predictTo(m.stamp);
-      ekf->updateOdom(m.v, m.omega, kROdom, m.stamp);
-    } else if (!ekf->initialized()) {
-      ekf->initialize(m.z, m.stamp);
-    } else {
-      ekf->predictTo(m.stamp);
-      ekf->update(m.z);
-    }
+    applyMeasurement(f.core, toMeasurement(f, m));
   }
-  return ekf;
+  return f.core;
 }
 
 /// 届いた順に LaggedEkf に入れる。巻き戻しが起きた回数を返す
-int runLagged(LaggedEkf & lagged, std::vector<Meas> ms)
+int runLagged(LaggedEkf & lagged, const Filter & f, std::vector<Meas> ms)
 {
   std::stable_sort(
     ms.begin(), ms.end(), [](const Meas & a, const Meas & b) {return a.arrival < b.arrival;});
   int replays = 0;
   for (const Meas & m : ms) {
-    const Status s = m.ndt ? lagged.addNdt(m.z, m.stamp).status :
-      lagged.addOdom(m.v, m.omega, kROdom, m.stamp).status;
+    const Status s = lagged.add(toMeasurement(f, m)).status;
     EXPECT_NE(s, Status::kTooOld);
     if (s == Status::kReplayed) {++replays;}
   }
   return replays;
 }
 
-void expectSameState(const VehicleEkf & a, const VehicleEkf & b, double tol = 1e-9)
+void expectSameState(const EkfCore & a, const EkfCore & b, double tol = 1e-9)
 {
   ASSERT_TRUE(a.initialized());
   ASSERT_TRUE(b.initialized());
@@ -156,18 +165,20 @@ void expectSameState(const VehicleEkf & a, const VehicleEkf & b, double tol = 1e
 TEST(LaggedEkf, InOrderMatchesPlainEkf)
 {
   const auto ms = scenario(0.0);
-  LaggedEkf lagged(makeOdomEkf(), 1.0);
-  EXPECT_EQ(runLagged(lagged, ms), 0);
-  expectSameState(lagged.current(), *runInOrder(ms));
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
+  EXPECT_EQ(runLagged(lagged, f, ms), 0);
+  expectSameState(lagged.current(), runInOrder(ms));
 }
 
 TEST(LaggedEkf, DelayedNdtMatchesInOrder)
 {
   // NDT の計算に 0.15 s かかる：その間のオドメトリ 7〜8 個を毎回適用し直す
   const auto ms = scenario(0.15);
-  LaggedEkf lagged(makeOdomEkf(), 1.0);
-  EXPECT_GT(runLagged(lagged, ms), 15);
-  expectSameState(lagged.current(), *runInOrder(ms));
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
+  EXPECT_GT(runLagged(lagged, f, ms), 15);
+  expectSameState(lagged.current(), runInOrder(ms));
   // 推定も真値に追従している
   const Eigen::Affine3d T = lagged.current().basePose();
   const Eigen::Affine3d T_true = truth(lagged.current().lastStamp());
@@ -182,26 +193,28 @@ TEST(LaggedEkf, OutOfOrderOdomMatchesInOrder)
   for (std::size_t i = 0; i + 1 < ms.size(); i += 2) {
     if (!ms[i].ndt && !ms[i + 1].ndt) {std::swap(ms[i].arrival, ms[i + 1].arrival);}
   }
-  LaggedEkf lagged(makeOdomEkf(), 1.0);
-  runLagged(lagged, ms);
-  expectSameState(lagged.current(), *runInOrder(ms));
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
+  runLagged(lagged, f, ms);
+  expectSameState(lagged.current(), runInOrder(ms));
 }
 
 TEST(LaggedEkf, InitializesFromDelayedNdtAndCatchesUp)
 {
-  LaggedEkf lagged(makeOdomEkf(), 1.0);
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
   for (int i = 0; i <= 15; ++i) {
-    const auto r = lagged.addOdom(kV, kOmega, kROdom, kT0 + i * 0.02);
-    EXPECT_FALSE(r.filter_initialized);
+    const auto r = lagged.add(f.odom->measurement(kV, kOmega, kROdom, kT0 + i * 0.02));
+    EXPECT_FALSE(r.outcome.was_initialized);
   }
   EXPECT_FALSE(lagged.initialized());
 
   // t0 + 0.105 の NDT が t0 + 0.3 に届く
-  VehicleEkf proto;
-  proto.setParams(params());
-  const auto r = lagged.addNdt(poseVec(truth(kT0 + 0.105) * proto.mountTransform()), kT0 + 0.105);
+  const auto r = lagged.add(
+    f.ndt->measurement(poseVec(truth(kT0 + 0.105) * mount()), kT0 + 0.105));
   EXPECT_EQ(r.status, Status::kReplayed);
-  EXPECT_TRUE(r.initialized);
+  EXPECT_TRUE(r.outcome.initialized_now);
+  EXPECT_TRUE(r.outcome.aided);
   EXPECT_EQ(r.replayed, 10u);   // t0 + 0.12 〜 t0 + 0.30 のオドメトリ
   ASSERT_TRUE(lagged.initialized());
   // 最新のオドメトリの時刻まで追いつき、速度は初期化前のオドメトリから始まっている
@@ -215,86 +228,71 @@ TEST(LaggedEkf, InitializesFromDelayedNdtAndCatchesUp)
 TEST(LaggedEkf, TooOldMeasurementIsDropped)
 {
   const auto ms = scenario(0.0, 2.0);
-  LaggedEkf lagged(makeOdomEkf(), 0.5);
-  runLagged(lagged, ms);
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 0.5);
+  runLagged(lagged, f, ms);
   // 履歴は最新から 0.5 s ぶん（50 Hz ＋ 10 Hz）程度に収まっている
   EXPECT_LE(lagged.historySize(), 33u);
 
-  const VehicleEkf::StateVector x_before = lagged.current().state();
-  const auto r = lagged.addNdt(ms.back().z, kT0 + 1.0);   // 1 s 前（履歴の外）
+  const EkfCore::StateVector x_before = lagged.current().state();
+  const auto r = lagged.add(f.ndt->measurement(ms.back().z, kT0 + 1.0));   // 1 s 前（履歴の外）
   EXPECT_EQ(r.status, Status::kTooOld);
-  const auto o = lagged.addOdom(kV, kOmega, kROdom, kT0 + 1.0);
+  const auto o = lagged.add(f.odom->measurement(kV, kOmega, kROdom, kT0 + 1.0));
   EXPECT_EQ(o.status, Status::kTooOld);
   EXPECT_EQ(lagged.current().state(), x_before);
 }
 
 TEST(LaggedEkf, PredictedDoesNotChangeCurrent)
 {
-  LaggedEkf lagged(makeOdomEkf(), 1.0);
-  runLagged(lagged, scenario(0.0, 1.0));
-  const VehicleEkf::StateVector x = lagged.current().state();
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
+  runLagged(lagged, f, scenario(0.0, 1.0));
+  const EkfCore::StateVector x = lagged.current().state();
   const double t = lagged.current().lastStamp();
 
-  const auto pred = lagged.predicted(t + 0.05);
+  const EkfCore pred = lagged.predicted(t + 0.05);
   EXPECT_EQ(lagged.current().state(), x);
-  EXPECT_NEAR(pred->lastStamp(), t + 0.05, 1e-12);
-  auto ref = lagged.current().clone();
-  ref->predictTo(t + 0.05);
-  EXPECT_EQ(pred->state(), ref->state());
+  EXPECT_NEAR(pred.lastStamp(), t + 0.05, 1e-12);
+  EkfCore ref = lagged.current();
+  ref.predictTo(t + 0.05);
+  EXPECT_EQ(pred.state(), ref.state());
   // 前進している
-  EXPECT_GT((pred->basePose().translation() - lagged.current().basePose().translation()).norm(),
+  EXPECT_GT((pred.basePose().translation() - lagged.current().basePose().translation()).norm(),
     0.03);
 }
 
 TEST(LaggedEkf, ResetWaitsForNextNdt)
 {
   const auto ms = scenario(0.15, 1.0);
-  LaggedEkf lagged(makeOdomEkf(), 1.0);
-  runLagged(lagged, ms);
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
+  runLagged(lagged, f, ms);
   ASSERT_TRUE(lagged.initialized());
 
   lagged.reset();
   EXPECT_FALSE(lagged.initialized());
   EXPECT_EQ(lagged.historySize(), 0u);
   const double t = kT0 + 1.2;
-  EXPECT_FALSE(lagged.addOdom(kV, kOmega, kROdom, t).filter_initialized);
+  EXPECT_FALSE(
+    lagged.add(f.odom->measurement(kV, kOmega, kROdom, t)).outcome.was_initialized);
   EXPECT_FALSE(lagged.initialized());
 
-  VehicleEkf proto;
-  proto.setParams(params());
-  const auto r = lagged.addNdt(poseVec(truth(t + 0.01) * proto.mountTransform()), t + 0.01);
-  EXPECT_TRUE(r.initialized);
+  const auto r = lagged.add(f.ndt->measurement(poseVec(truth(t + 0.01) * mount()), t + 0.01));
+  EXPECT_TRUE(r.outcome.initialized_now);
   EXPECT_TRUE(lagged.initialized());
 }
 
-TEST(LaggedEkf, NdtOnlyIgnoresOdom)
+TEST(LaggedEkf, NdtOnlyReordersDelayedNdt)
 {
-  auto ekf = std::make_unique<VehicleEkf>();
-  ekf->setParams(params());
-  ekf->reset();
-  LaggedEkf lagged(std::move(ekf), 1.0);
-  EXPECT_FALSE(lagged.usesOdom());
-  EXPECT_EQ(lagged.addOdom(kV, kOmega, kROdom, kT0).status, Status::kIgnored);
-  EXPECT_EQ(lagged.historySize(), 0u);
-
-  // NDT だけでも遅れて届いたものを時刻順に入れ直す
+  // オドメトリの観測モデルがなくても、遅れて届いた NDT を時刻順に入れ直す
   const auto ms = scenario(0.15, 1.0);
   std::vector<Meas> ndt_only;
   for (const Meas & m : ms) {
     if (m.ndt) {ndt_only.push_back(m);}
   }
   std::swap(ndt_only[3].arrival, ndt_only[4].arrival);
-  runLagged(lagged, ndt_only);
-  auto ref = std::make_unique<VehicleEkf>();
-  ref->setParams(params());
-  ref->reset();
-  for (const Meas & m : ndt_only) {
-    if (!ref->initialized()) {
-      ref->initialize(m.z, m.stamp);
-    } else {
-      ref->predictTo(m.stamp);
-      ref->update(m.z);
-    }
-  }
-  expectSameState(lagged.current(), *ref);
+  const Filter f = makeFilter(false);
+  LaggedEkf lagged(f.core, 1.0);
+  runLagged(lagged, f, ndt_only);
+  expectSameState(lagged.current(), runInOrder(ndt_only, false));
 }

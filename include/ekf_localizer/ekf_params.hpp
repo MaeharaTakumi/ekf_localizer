@@ -8,8 +8,10 @@
 
 #include "rclcpp/rclcpp.hpp"
 
-#include "ekf_localizer/vehicle_ekf.hpp"
-#include "ekf_localizer/vehicle_odom_ekf.hpp"
+#include "ekf_localizer/ekf_core.hpp"
+#include "ekf_localizer/lagged_ekf.hpp"
+#include "ekf_localizer/ndt_model.hpp"
+#include "ekf_localizer/odom_model.hpp"
 
 namespace ekf_localizer
 {
@@ -17,7 +19,7 @@ namespace ekf_localizer
 /// EKF ノードのパラメータ一式（param/ekf.yaml）
 struct EkfConfig
 {
-  /// オドメトリを観測に使うか（true：VehicleOdomEkf / false：VehicleEkf）
+  /// オドメトリを観測に使うか
   bool use_odom{false};
   /// 購読するトピック
   std::string ndt_pose_topic{"ndt_pose"};
@@ -40,9 +42,19 @@ struct EkfConfig
   /// オドメトリの遅れ [s]。twist が実際の動きより遅れる分（移動平均など）を、stamp から引いて補う
   double odom_delay{0.0};
 
-  /// 取付（o_x〜yaw_o）は TF から読んで createEkf() で入れる
-  VehicleEkf::Params params;
-  VehicleOdomEkf::OdomParams odom_params;
+  EkfCore::Params core;
+  /// 取付 base → LiDAR は TF から読んで createFilter() で入れる
+  NdtModel::Params ndt;
+  OdomModel::Params odom;
+};
+
+/// EKF 一式：履歴つきの EKF 本体と、観測モデル
+struct EkfFilter
+{
+  std::shared_ptr<const NdtModel> ndt;
+  /// use_odom: false なら null
+  std::shared_ptr<const OdomModel> odom;
+  std::unique_ptr<LaggedEkf> lagged;
 };
 
 /// EKF のパラメータを宣言する（コンストラクタから呼ぶ）
@@ -51,8 +63,8 @@ void declareEkfParameters(rclcpp::Node & node);
 EkfConfig loadEkfConfig(rclcpp::Node & node);
 /// 読み込んだ値を INFO で出す
 void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg);
-/// use_odom に応じた EKF を作る。mount は base → LiDAR の取付変換
-std::unique_ptr<VehicleEkf> createEkf(const EkfConfig & cfg, const Eigen::Affine3d & mount);
+/// EKF 一式を作る（use_odom: true ならオドメトリの観測モデルも）。mount は base → LiDAR の取付変換
+EkfFilter createFilter(const EkfConfig & cfg, const Eigen::Affine3d & mount);
 
 }  // namespace ekf_localizer
 

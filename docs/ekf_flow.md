@@ -12,12 +12,14 @@ flowchart LR
   timer["タイマー<br/>predict_rate（50 Hz）"] --> cbT["timerCallback"]
 
   subgraph node["EkfLocalizer（ROS ノード、シングルスレッド）"]
-    cbO --> lag
-    cbN --> lag
+    cbO --> om["OdomModel<br/>メッセージ → 観測"]
+    cbN --> nm["NdtModel<br/>メッセージ → 観測"]
+    om --> lag
+    nm --> lag
     cbI -->|reset| lag
     lag["LaggedEkf<br/>観測と状態の履歴・巻き戻し"]
-    core["VehicleOdomEkf / VehicleEkf<br/>8 状態の EKF 本体"]
-    lag --- core
+    core["EkfCore<br/>8 状態の EKF 本体"]
+    lag -->|観測ごとに<br/>applyMeasurement| core
     cbT -->|最新の状態をコピーして予測| lag
   end
 
@@ -28,10 +30,106 @@ flowchart LR
 
 | クラス | ファイル | 役割 |
 |---|---|---|
-| `EkfLocalizer` | `src/ekf_localizer_node.cpp` | 購読・配信・タイマー。ROS とのやりとり |
-| `LaggedEkf` | `src/lagged_ekf.cpp` | 観測を時刻順に保持し、遅れて届いた観測を正しい位置に入れ直す |
-| `VehicleEkf` | `src/vehicle_ekf.cpp` | EKF 本体（予測と、NDT の観測による更新） |
-| `VehicleOdomEkf` | `src/vehicle_odom_ekf.cpp` | `VehicleEkf` にオドメトリの観測を加えたもの（`use_odom: true`） |
+| `EkfLocalizer` | `src/ekf_localizer_node.cpp` | 購読・配信・タイマー。メッセージを観測モデルで観測にして `LaggedEkf` に入れる |
+| `LaggedEkf` | `src/lagged_ekf.cpp` | 観測を時刻順に保持し、遅れて届いた観測を正しい位置に入れ直す。センサの種類は知らない |
+| `EkfCore` | `src/ekf_core.cpp` | EKF 本体。状態 x, P、予測、一般形の更新。センサの種類は知らない |
+| `ObservationModel` | `src/observation_model.cpp` | 観測モデルのインターフェースと、観測を 1 つ適用する共通の流れ（`applyMeasurement`、2 章） |
+| `NdtModel` | `src/ndt_model.cpp` | NDT の解の観測モデル（初期化、4 段の更新、ロックアウト） |
+| `OdomModel` | `src/odom_model.cpp` | オドメトリの観測モデル（`use_odom: true` のときだけ作る） |
+
+### クラスの関係
+
+```mermaid
+classDiagram
+  direction LR
+
+  class EkfLocalizer {
+    -EkfFilter filter_
+    -addMeasurement(MeasurementPtr)
+    -publish(EkfCore, stamp)
+  }
+  class EkfFilter {
+    +shared_ptr~NdtModel~ ndt
+    +shared_ptr~OdomModel~ odom
+    +unique_ptr~LaggedEkf~ lagged
+  }
+  class LaggedEkf {
+    -EkfCore anchor_
+    -deque~Entry~ history_
+    +add(MeasurementPtr) Result
+    +reset()
+    +current() EkfCore
+    +predicted(t) EkfCore
+  }
+  class EkfCore {
+    -x, P, t_x
+    -vector~GateState~ gates_
+    -MeasurementPtr init_aid_
+    +initialize(x0, t)
+    +predictTo(t)
+    +kalmanUpdate(y, H, R, γ) bool
+    +addGates(n) int
+  }
+  class Measurement {
+    +shared_ptr~ObservationModel~ model
+    +stamp
+    +z
+    +r
+  }
+  class ObservationModel {
+    <<interface>>
+    +name()
+    +initialState(Measurement)
+    +aidsInitialization() bool
+    +aidInitialization(EkfCore, Measurement, t) bool
+    +update(EkfCore, Measurement) StageResult[]
+  }
+  class NdtModel {
+    -Params prm_
+    -T_BL mount_
+    +measurement(z, t) MeasurementPtr
+    +lidarPose(x)
+    +observationJacobian(x)
+  }
+  class OdomModel {
+    -Params prm_
+    +measurement(v, omega, r, t) MeasurementPtr
+  }
+
+  EkfLocalizer *-- EkfFilter
+  EkfFilter *-- LaggedEkf
+  EkfFilter o-- NdtModel
+  EkfFilter o-- OdomModel
+  LaggedEkf *-- "1..*" EkfCore : 起点と、履歴の各時点の状態
+  LaggedEkf o-- "*" Measurement : 履歴の観測
+  EkfCore o-- "0..1" Measurement : 初期化用の観測
+  Measurement --> ObservationModel : model
+  ObservationModel <|-- NdtModel
+  ObservationModel <|-- OdomModel
+  ObservationModel ..> EkfCore : update で x, P とゲートを書き換える
+```
+
+| 記号 | 意味 |
+|---|---|
+| ◆（`*--`） | 所有する（持ち主と一緒に作られ、消える） |
+| ◇（`o--`） | 共有する（`shared_ptr` で参照する） |
+| △（`<\|--`） | 継承（観測モデルの実装） |
+| 点線（`..>`） | 使う（引数で受け取って呼ぶ） |
+
+- **EkfCore は値として複製されます。** `LaggedEkf` は、起点と履歴の各時点に 1 つずつ `EkfCore` を持ちます。ゲートの状態と初期化用の観測も `EkfCore` の中にあるので、巻き戻すと一緒に戻ります。
+- **観測モデルは設定だけを持ち、変わる値を持ちません。** そのため、すべての観測とノードで 1 つを共有できます。
+- **観測（Measurement）は作ったあと変えません。** 履歴と初期化用の観測で、同じものを `shared_ptr` で共有します。
+- **観測の処理は、観測が指す観測モデルに任せます。** `LaggedEkf` は観測ごとに `applyMeasurement(EkfCore, 観測)` を呼び、その中で `観測.model` の `initialState`・`update` などを呼びます。`LaggedEkf` と `EkfCore` は、どの観測モデルかを知りません。
+
+### センサを足すとき
+
+1. `ObservationModel` を継承した観測モデルを 1 つ書く。
+   - `update()`：y, H, R, γ を組み立てて `EkfCore::kalmanUpdate` を呼ぶ。更新を段に分けてもよい
+   - 初期化できる観測なら `initialState()`、初期化を補う観測なら `aidsInitialization()`・`aidInitialization()`
+   - ゲートの状態はコンストラクタで `EkfCore::addGates()` を呼んで確保する（履歴と一緒に巻き戻すため）
+2. ノードに、メッセージから観測を作って `addMeasurement()` に渡すコールバックを書く。
+
+`LaggedEkf` と `EkfCore` は変えなくて済みます。ログ（棄却・ロックアウト・初期化・古すぎる観測）も共通です。
 
 コールバックは 1 つずつ順に実行されます（シングルスレッド）。1 回の処理は最も重い場合でも 0.3 ms 未満で、50 Hz の周期に対して十分に軽い処理です。
 
@@ -77,7 +175,7 @@ NDT が出すのは LiDAR の姿勢なので、base と LiDAR の間を取付 T_
 
 1. パラメータを読む（`param/ekf.yaml`）。
 2. タイマーのたびに、TF から取付 T_BL を引く。取れるまでは `Waiting for TF ...` を出して待つ。
-3. 取付が取れたらフィルタを作る（`use_odom` が true なら `VehicleOdomEkf`、false なら `VehicleEkf`）。この時点では**未初期化**で、何も配信しない。
+3. 取付が取れたらフィルタを作る（`EkfCore`、`NdtModel`、`use_odom` が true なら `OdomModel`、`LaggedEkf`）。この時点では**未初期化**で、何も配信しない。
 
 取付は起動時に 1 回しか読みません。静的 TF を変えたら、EKF も起動し直してください。
 
@@ -150,7 +248,7 @@ flowchart TD
 - **観測値の取り出し**：姿勢のクォータニオンを roll, pitch, yaw に直します。
 - **初期化**：T_B = T_L · T_BL⁻¹ で状態の位置・姿勢を作り、P = diag(`P_init`)、t_x = t_z とします。
   v・omega は 0 から始めます。ただし `use_odom: true` で、覚えているオドメトリの時刻 t_o が |t_z − t_o| ≤ `odom_timeout_init`（0.2 秒）なら、
-  v = v_o、omega = omega_o とし、その分散を観測ノイズの値にします（`EKF initialized from odometry`）。
+  v = v_o、omega = omega_o とし、その分散を観測ノイズの値にします（`EKF initialized by NDT (v, omega = ... from Odometry)`）。
 - **4 段の更新**：共通の流れの判定・更新を、成分を分けて順に行います。
 
   | 段 | 対象 | ゲート（既定） | 棄却が続いたとき |

@@ -1,6 +1,7 @@
 #ifndef EKF_LOCALIZER__EKF_LOCALIZER_NODE_HPP_
 #define EKF_LOCALIZER__EKF_LOCALIZER_NODE_HPP_
 
+#include <map>
 #include <memory>
 
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
@@ -11,7 +12,6 @@
 #include "tf2_ros/transform_listener.h"
 
 #include "ekf_localizer/ekf_params.hpp"
-#include "ekf_localizer/lagged_ekf.hpp"
 
 namespace ekf_localizer
 {
@@ -22,8 +22,9 @@ namespace ekf_localizer
 ///         トピック名は ndt_pose_topic / odom_topic / initialpose_topic で変えられる
 ///   出力  ekf_pose（map → LiDAR）、ekf_odom（map → base、v, omega）、TF map → base
 ///
-///   観測は届いた時点で LaggedEkf に入れる。NDT は遅れて届くので、点群の取得時刻まで巻き戻して
-///   それ以降のオドメトリを適用し直す。出力は predict_rate の周期で、最新の状態を現在時刻まで予測して出す。
+///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。NDT は遅れて届くので、
+///   点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す。
+///   出力は predict_rate の周期で、最新の状態を現在時刻まで予測して出す。
 ///   取付 base → LiDAR は TF（静的）から読む。読めるまでは観測を捨てる。
 class EkfLocalizer : public rclcpp::Node
 {
@@ -37,12 +38,16 @@ private:
   void timerCallback();
   /// 取付 base → LiDAR を TF から読んで EKF を作る。作れたら true
   bool tryCreateFilter();
+  /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
+  void addMeasurement(const MeasurementPtr & m);
   /// ekf の推定値を stamp の時刻として配信する
-  void publish(const VehicleEkf & ekf, const rclcpp::Time & stamp);
+  void publish(const EkfCore & ekf, const rclcpp::Time & stamp);
 
   EkfConfig cfg_;
-  /// 取付が TF から読めるまで null
-  std::unique_ptr<LaggedEkf> filter_;
+  /// EKF 一式（filter_.lagged は取付が TF から読めるまで null）
+  EkfFilter filter_;
+  /// 観測モデルごとの、「古すぎる」WARN を最後に出した時刻（5 秒に 1 回にする）
+  std::map<const ObservationModel *, rclcpp::Time> too_old_warned_;
   /// 最後に配信した時刻（同じ時刻で 2 回出さない）
   rclcpp::Time last_publish_stamp_;
 
