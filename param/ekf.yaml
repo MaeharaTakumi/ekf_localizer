@@ -15,20 +15,17 @@
       base_frame_id: "base_link"
       lidar_frame_id: "velodyne"
 
-      # [x, y, z, roll, pitch, yaw, v, omega]
-      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 1.0e-2]
+      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 1.0e-2] # [x, y, z, roll, pitch, yaw, v, omega]
       P_init: [2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.01]
-      # [x, y, z, roll, pitch, yaw]（LiDAR）
-      R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3]
-      # [v, omega]
-      R_odom: [2.5e-3, 5.0e-3]
+      R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3] # [x, y, z, roll, pitch, yaw]（LiDAR）
+      R_odom: [2.5e-3, 5.0e-3]  # [v, omega]
 
-      gate_horizontal: 11.34
-      gate_1d: 6.63
+      gate_horizontal: 1.0e9
+      gate_1d: 1.0e9
       lockout_count: 10
       ndt_delay: 0.0
 
       odom_covariance_source: "param"
       gate_odom: 1.0e9
       odom_timeout_init: 0.2
-      odom_delay: 0.09
+      odom_delay: 0.00
