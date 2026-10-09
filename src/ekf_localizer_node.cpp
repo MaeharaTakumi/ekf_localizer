@@ -55,6 +55,14 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
     "ekf_pose", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   ekf_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("ekf_odom", rclcpp::QoS(10));
 
+  if (cfg_.publish_trigger == "cloud") {
+    // 点群は stamp しか使わない。best effort は reliable / best effort どちらの publisher とも接続できる
+    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      cfg_.points_topic, rclcpp::SensorDataQoS(),
+      std::bind(&EkfLocalizer::cloudReceived, this, std::placeholders::_1));
+    return;
+  }
+
   // ROS 時刻のタイマー（use_sim_time ならシミュレーション時刻で回る）
   const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::duration<double>(1.0 / cfg_.predict_rate));
@@ -180,6 +188,20 @@ void EkfLocalizer::initialPoseReceived(
   // 姿勢を与え直したので、次の NDT 観測で初期化し直す（ゲートに引っかかり続けるのを防ぐ）
   filter_.lagged->reset();
   RCLCPP_INFO(get_logger(), "initialpose received: EKF reset.");
+}
+
+void EkfLocalizer::cloudReceived(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
+{
+  if (!filter_.lagged && !tryCreateFilter()) {return;}
+  if (!filter_.lagged->initialized()) {return;}
+
+  // 点群の取得時刻（stamp）の予測を出す。この点群の NDT はまだ届いていないので、
+  // stamp 以前の観測（前の NDT とオドメトリ）からの予測になる。NDT の初期値にもこの TF が使われる
+  const rclcpp::Time stamp(msg->header.stamp, RCL_ROS_TIME);
+  if (stamp <= last_publish_stamp_) {return;}
+  last_publish_stamp_ = stamp;
+
+  publish(filter_.lagged->at(stamp.seconds()), stamp);
 }
 
 void EkfLocalizer::timerCallback()

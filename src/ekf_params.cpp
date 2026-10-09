@@ -13,6 +13,8 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("ndt_pose_topic", "ndt_pose");
   node.declare_parameter("odom_topic", "odom");
   node.declare_parameter("initialpose_topic", "initialpose");
+  node.declare_parameter("publish_trigger", "timer");
+  node.declare_parameter("points_topic", "velodyne_points");
   node.declare_parameter("predict_rate", 50.0);
   node.declare_parameter("history_length", 1.0);
   node.declare_parameter("publish_tf", true);
@@ -72,6 +74,8 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   node.get_parameter("ndt_pose_topic", cfg.ndt_pose_topic);
   node.get_parameter("odom_topic", cfg.odom_topic);
   node.get_parameter("initialpose_topic", cfg.initialpose_topic);
+  choose("publish_trigger", cfg.publish_trigger, {"timer", "cloud"});
+  node.get_parameter("points_topic", cfg.points_topic);
   node.get_parameter("predict_rate", cfg.predict_rate);
   if (!(cfg.predict_rate > 0.0)) {
     RCLCPP_WARN(logger, "predict_rate must be positive (got %lf). Using 50.0.", cfg.predict_rate);
@@ -142,9 +146,15 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     logger, "ekf frames: %s -> %s (lidar: %s), publish_tf: %d",
     cfg.map_frame_id.c_str(), cfg.base_frame_id.c_str(), cfg.lidar_frame_id.c_str(),
     cfg.publish_tf);
-  RCLCPP_INFO(
-    logger, "ekf predict_rate: %lf Hz, history_length: %lf s",
-    cfg.predict_rate, cfg.history_length);
+  if (cfg.publish_trigger == "cloud") {
+    RCLCPP_INFO(
+      logger, "ekf publish_trigger: cloud (%s), history_length: %lf s",
+      cfg.points_topic.c_str(), cfg.history_length);
+  } else {
+    RCLCPP_INFO(
+      logger, "ekf publish_trigger: timer (%lf Hz), history_length: %lf s",
+      cfg.predict_rate, cfg.history_length);
+  }
   RCLCPP_INFO(
     logger, "ekf gate_horizontal: %lf, gate_1d: %lf, lockout_count: %d",
     nprm.gate_horizontal, nprm.gate_1d, nprm.lockout_count);

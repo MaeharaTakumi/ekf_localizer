@@ -2,7 +2,10 @@
 /**:
     ros__parameters:
       use_odom: true
-      predict_rate: 50.0
+      # 配信のきっかけ："timer"（predict_rate の周期）or "cloud"（点群の stamp の時刻の予測）
+      publish_trigger: "timer"
+      points_topic: "velodyne_points"
+      predict_rate: 20.0
       history_length: 1.0
       max_predict_dt: 0.2
       publish_tf: true
@@ -20,12 +23,12 @@
       R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3] # [x, y, z, roll, pitch, yaw]（LiDAR）
       R_odom: [2.5e-3, 5.0e-3]  # [v, omega]
 
-      gate_horizontal: 1.0e9
-      gate_1d: 1.0e9
+      gate_horizontal: 1.0e5
+      gate_1d: 1.0e5
       lockout_count: 10
       ndt_delay: 0.0
 
       odom_covariance_source: "param"
-      gate_odom: 1.0e9
+      gate_odom: 1.0e5
       odom_timeout_init: 0.2
       odom_delay: 0.00

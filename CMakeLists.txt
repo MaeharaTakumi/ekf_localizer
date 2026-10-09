@@ -17,6 +17,7 @@ find_package(Eigen3 REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_eigen REQUIRED)
@@ -45,6 +46,7 @@ ament_target_dependencies(ekf_localizer_node
   rclcpp
   geometry_msgs
   nav_msgs
+  sensor_msgs
   tf2
   tf2_ros
   tf2_eigen

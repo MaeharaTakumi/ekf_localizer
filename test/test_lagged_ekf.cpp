@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <memory>
 #include <random>
 #include <vector>
@@ -295,4 +296,25 @@ TEST(LaggedEkf, NdtOnlyReordersDelayedNdt)
   LaggedEkf lagged(f.core, 1.0);
   runLagged(lagged, f, ndt_only);
   expectSameState(lagged.current(), runInOrder(ndt_only, false));
+}
+
+TEST(LaggedEkf, AtUsesOnlyMeasurementsUpToT)
+{
+  // NDT が遅れて届いたあとでも、at(t) は t 以前の観測だけで求めた状態を t まで予測したものになる
+  const std::vector<Meas> ms = scenario(0.15, 1.0);
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
+  runLagged(lagged, f, ms);
+
+  for (const double t : {kT0 + 0.523, kT0 + 0.7, kT0 + 0.905}) {
+    std::vector<Meas> before;
+    std::copy_if(
+      ms.begin(), ms.end(), std::back_inserter(before),
+      [t](const Meas & m) {return m.stamp <= t;});
+    EkfCore ref = runInOrder(before);
+    ref.predictTo(t);
+    expectSameState(lagged.at(t), ref);
+  }
+  // current() は変えない
+  EXPECT_GT(lagged.current().lastStamp(), kT0 + 0.905);
 }

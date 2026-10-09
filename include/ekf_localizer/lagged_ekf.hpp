@@ -57,6 +57,9 @@ public:
   const EkfCore & current() const;
   /// current() を t まで予測したコピー（current() は変えない）
   EkfCore predicted(double t) const;
+  /// 時刻 t の状態：t 以前の最後の観測を適用した直後の状態を t まで予測したコピー。
+  /// t より新しい観測は使わない（t が起点より古ければ起点の状態のまま）
+  EkfCore at(double t) const;
   std::size_t historySize() const {return history_.size();}
   double historyLength() const {return history_length_;}
   /// 最新の観測の時刻。履歴が空なら起点の時刻（リセット直後は -inf）

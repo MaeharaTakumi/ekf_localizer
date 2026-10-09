@@ -7,6 +7,7 @@
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_broadcaster.h"
 #include "tf2_ros/transform_listener.h"
@@ -24,7 +25,9 @@ namespace ekf_localizer
 ///
 ///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。NDT は遅れて届くので、
 ///   点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す。
-///   出力は predict_rate の周期で、最新の状態を現在時刻まで予測して出す。
+///   出力は publish_trigger で選ぶ。
+///     timer  predict_rate の周期で、最新の状態を現在時刻まで予測して出す
+///     cloud  点群（points_topic）が届くたびに、その stamp の時刻の予測を出す
 ///   取付 base → LiDAR は TF（静的）から読む。読めるまでは観測を捨てる。
 class EkfLocalizer : public rclcpp::Node
 {
@@ -35,6 +38,7 @@ private:
   void ndtPoseReceived(const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg);
   void odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
   void initialPoseReceived(const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg);
+  void cloudReceived(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
   void timerCallback();
   /// 取付 base → LiDAR を TF から読んで EKF を作る。作れたら true
   bool tryCreateFilter();
@@ -58,6 +62,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr ndt_pose_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr ekf_pose_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ekf_odom_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

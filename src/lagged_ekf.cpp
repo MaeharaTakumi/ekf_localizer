@@ -1,6 +1,7 @@
 #include "ekf_localizer/lagged_ekf.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 
 namespace ekf_localizer
@@ -21,6 +22,16 @@ const EkfCore & LaggedEkf::current() const
 EkfCore LaggedEkf::predicted(double t) const
 {
   EkfCore ekf = current();
+  ekf.predictTo(t);
+  return ekf;
+}
+
+EkfCore LaggedEkf::at(double t) const
+{
+  const auto it = std::upper_bound(
+    history_.begin(), history_.end(), t,
+    [](double t, const Entry & e) {return t < e.m->stamp;});
+  EkfCore ekf = (it == history_.begin()) ? anchor_ : std::prev(it)->state;
   ekf.predictTo(t);
   return ekf;
 }
