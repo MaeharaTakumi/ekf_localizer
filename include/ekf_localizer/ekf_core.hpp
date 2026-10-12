@@ -25,8 +25,8 @@ Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw);
 ///
 ///   状態 x = [x, y, z, roll, pitch, yaw, v, omega]^T
 ///        … map → base の 6 自由度姿勢（ZYX）と、車体の前進速度・ヨー角速度
-///   運動 車体 x 軸方向にだけ進む。水平は円弧の厳密積分（速度 v cos(pitch)）、z は -v sin(pitch)。
-///        roll, pitch, v, omega はランダムウォーク
+///   運動 水平面を移動すると仮定し、x, y, yaw を中点法（RK2）で積分する（roll, pitch による v, omega の
+///        分解は考えない）。z, roll, pitch は予測では動かさず Q のノイズだけ。v, omega はランダムウォーク
 ///   更新 一般形の kalmanUpdate だけを持つ。観測ごとの y, H, R, ゲートは観測モデルが組み立てる
 ///
 ///   履歴（LaggedEkf）の各時点でコピーして持つので、巻き戻しで一緒に戻すべき値もここに置く。

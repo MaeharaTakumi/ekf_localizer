@@ -26,26 +26,6 @@ Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw)
          Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX())).toRotationMatrix();
 }
 
-namespace
-{
-
-/// sinc(u) = sin(u)/u と、その導関数。u → 0 では級数で評価する
-void sincAndDerivative(double u, double & k, double & dk)
-{
-  if (std::abs(u) < 1.0e-3) {
-    const double u2 = u * u;
-    k = 1.0 - u2 / 6.0 + u2 * u2 / 120.0;
-    dk = -u / 3.0 + u * u2 / 30.0;
-  } else {
-    const double s = std::sin(u);
-    const double c = std::cos(u);
-    k = s / u;
-    dk = (u * c - s) / (u * u);
-  }
-}
-
-}  // namespace
-
 EkfCore::EkfCore()
 : EkfCore(Params())
 {
@@ -77,26 +57,19 @@ void EkfCore::wrapAngles(StateVector & x)
 
 EkfCore::StateVector EkfCore::propagate(const StateVector & x, double dt)
 {
-  // 車体 x 軸方向の速度 v を map に回すと (v cos(pitch) [cos yaw, sin yaw], -v sin(pitch))。
-  // 水平は円弧の厳密積分を半角公式で書いた形（pitch は区間内一定）：
-  //   変位 = v cos(pitch) dt * sinc(alpha/2) * [cos(yaw + alpha/2), sin(yaw + alpha/2)]
-  // alpha → 0 で自然にオイラー積分に一致するので分岐が要らない
+  // 水平面を移動すると仮定し、車体 x 軸方向の速度 v と yaw の角速度 omega を中点法（RK2）で積分する：
+  //   yaw_m = yaw + omega dt / 2（区間の中点の向き）
+  //   x += v dt cos(yaw_m)、y += v dt sin(yaw_m)、yaw += omega dt
+  // roll, pitch による v, omega の分解は考えない。z, roll, pitch は予測では動かさず、Q のノイズだけを与える。
+  // v, omega はランダムウォーク
   const double v = x(kV);
   const double omega = x(kOmega);
-  const double u = 0.5 * omega * dt;
-  double k, dk;
-  sincAndDerivative(u, k, dk);
-  const double beta = x(kYaw) + u;
-  const double ct = std::cos(x(kPitch));
-  const double st = std::sin(x(kPitch));
+  const double yaw_m = x(kYaw) + 0.5 * omega * dt;
 
   StateVector xn = x;
-  xn(kX) += v * ct * dt * k * std::cos(beta);
-  xn(kY) += v * ct * dt * k * std::sin(beta);
-  xn(kZ) -= v * st * dt;   // ZYX ではピッチ正が機首下げ。上り坂は pitch < 0 で z が増える
-  // yaw の変化率は本来 omega cos(roll)/cos(pitch) だが omega で近似する（1/12 勾配で 0.35%）
+  xn(kX) += v * dt * std::cos(yaw_m);
+  xn(kY) += v * dt * std::sin(yaw_m);
   xn(kYaw) = normalizeAngle(x(kYaw) + omega * dt);
-  // roll, pitch, v, omega はランダムウォーク
   return xn;
 }
 
@@ -104,28 +77,18 @@ EkfCore::StateMatrix EkfCore::transitionJacobian(const StateVector & x, double d
 {
   const double v = x(kV);
   const double omega = x(kOmega);
-  const double u = 0.5 * omega * dt;
-  double k, dk;
-  sincAndDerivative(u, k, dk);
-  const double beta = x(kYaw) + u;
-  const double cb = std::cos(beta);
-  const double sb = std::sin(beta);
-  const double ct = std::cos(x(kPitch));
-  const double st = std::sin(x(kPitch));
-  const double a = v * ct * dt;   // 水平方向の移動量（sinc 補正前）
+  const double yaw_m = x(kYaw) + 0.5 * omega * dt;
+  const double c = std::cos(yaw_m);
+  const double s = std::sin(yaw_m);
 
   StateMatrix F = StateMatrix::Identity();
-  F(kX, kPitch) = -v * st * dt * k * cb;
-  F(kY, kPitch) = -v * st * dt * k * sb;
-  F(kX, kYaw) = -a * k * sb;
-  F(kY, kYaw) = a * k * cb;
-  F(kX, kV) = ct * dt * k * cb;
-  F(kY, kV) = ct * dt * k * sb;
-  // d/d(omega)：u = omega*dt/2 なので du/d(omega) = dt/2
-  F(kX, kOmega) = 0.5 * a * dt * (dk * cb - k * sb);
-  F(kY, kOmega) = 0.5 * a * dt * (dk * sb + k * cb);
-  F(kZ, kPitch) = -v * ct * dt;
-  F(kZ, kV) = -st * dt;
+  F(kX, kYaw) = -v * dt * s;
+  F(kY, kYaw) = v * dt * c;
+  F(kX, kV) = dt * c;
+  F(kY, kV) = dt * s;
+  // d(yaw_m)/d(omega) = dt / 2
+  F(kX, kOmega) = -0.5 * v * dt * dt * s;
+  F(kY, kOmega) = 0.5 * v * dt * dt * c;
   F(kYaw, kOmega) = dt;
   return F;
 }

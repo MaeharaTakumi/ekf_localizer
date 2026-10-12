@@ -255,18 +255,35 @@ double rmsOver(
 // EkfCore（運動モデル）
 // ===========================================================================
 
-TEST(EkfCore, ArcIntegrationIsExact)
+TEST(EkfCore, MidpointIntegrationOnHorizontalPlane)
 {
   using E = EkfCore;
   VS x = VS::Zero();
-  x(E::kX) = 1.0; x(E::kY) = 2.0; x(E::kYaw) = 0.3; x(E::kV) = 1.2; x(E::kOmega) = 0.8;
-  for (double dt : {0.05, 0.2, 1.0, 3.0}) {
+  x(E::kX) = 1.0; x(E::kY) = 2.0; x(E::kZ) = 0.5; x(E::kRoll) = 0.05; x(E::kPitch) = -0.08;
+  x(E::kYaw) = 0.3; x(E::kV) = 1.2; x(E::kOmega) = 0.8;
+  for (double dt : {0.05, 0.2, 1.0}) {
     const VS xn = EkfCore::propagate(x, dt);
-    const double R = x(E::kV) / x(E::kOmega);
-    const double ex = x(E::kX) + R * (std::sin(x(E::kYaw) + x(E::kOmega) * dt) - std::sin(x(E::kYaw)));
-    const double ey = x(E::kY) - R * (std::cos(x(E::kYaw) + x(E::kOmega) * dt) - std::cos(x(E::kYaw)));
-    EXPECT_LT(std::hypot(xn(E::kX) - ex, xn(E::kY) - ey), 1e-12) << "dt=" << dt;
-    EXPECT_DOUBLE_EQ(xn(E::kZ), x(E::kZ)) << "pitch = 0 なら z は動かない";
+    const double yaw_m = x(E::kYaw) + 0.5 * x(E::kOmega) * dt;   // 区間の中点の向き
+    EXPECT_NEAR(xn(E::kX), x(E::kX) + x(E::kV) * dt * std::cos(yaw_m), 1e-12) << "dt=" << dt;
+    EXPECT_NEAR(xn(E::kY), x(E::kY) + x(E::kV) * dt * std::sin(yaw_m), 1e-12) << "dt=" << dt;
+    EXPECT_NEAR(normalizeAngle(xn(E::kYaw) - x(E::kYaw) - x(E::kOmega) * dt), 0.0, 1e-12);
+    // 水平面の仮定：roll, pitch があっても v を分解せず、z, roll, pitch は予測で動かない（Q のノイズだけ）
+    EXPECT_DOUBLE_EQ(xn(E::kZ), x(E::kZ));
+    EXPECT_DOUBLE_EQ(xn(E::kRoll), x(E::kRoll));
+    EXPECT_DOUBLE_EQ(xn(E::kPitch), x(E::kPitch));
+    EXPECT_DOUBLE_EQ(xn(E::kV), x(E::kV));
+    EXPECT_DOUBLE_EQ(xn(E::kOmega), x(E::kOmega));
+  }
+  // 円弧の厳密解とは向きが同じ（中点の向き）で、長さが v dt (1 - sinc(omega dt / 2)) だけ長い（1 ステップで O(dt^3)）
+  VS f = x;
+  f(E::kRoll) = f(E::kPitch) = 0.0;
+  for (double dt : {0.05, 0.2}) {
+    const VS xn = EkfCore::propagate(f, dt);
+    const double R = f(E::kV) / f(E::kOmega), u = 0.5 * f(E::kOmega) * dt;
+    const double ex = f(E::kX) + R * (std::sin(f(E::kYaw) + f(E::kOmega) * dt) - std::sin(f(E::kYaw)));
+    const double ey = f(E::kY) - R * (std::cos(f(E::kYaw) + f(E::kOmega) * dt) - std::cos(f(E::kYaw)));
+    EXPECT_NEAR(
+      std::hypot(xn(E::kX) - ex, xn(E::kY) - ey), f(E::kV) * dt * (1.0 - std::sin(u) / u), 1e-12) << "dt=" << dt;
   }
   VS a = VS::Zero();
   a(E::kYaw) = 0.3; a(E::kV) = 1.0; a(E::kOmega) = 1e-9;
@@ -274,17 +291,6 @@ TEST(EkfCore, ArcIntegrationIsExact)
   b(E::kOmega) = 0.0;
   EXPECT_LT((EkfCore::propagate(a, 0.1) - EkfCore::propagate(b, 0.1)).head<2>().norm(), 1e-9)
     << "omega → 0 で直線に連続（分岐なし）";
-
-  // 傾斜：水平速度は v cos(pitch)、z は -v sin(pitch)（上り坂は pitch < 0）
-  VS c = x;
-  const double th = -std::atan(1.0 / 12.0);
-  c(E::kPitch) = th;
-  const double dt = 0.5;
-  const VS cn = EkfCore::propagate(c, dt), xn = EkfCore::propagate(x, dt);
-  const double flat = std::hypot(xn(E::kX) - x(E::kX), xn(E::kY) - x(E::kY));
-  EXPECT_NEAR(std::hypot(cn(E::kX) - c(E::kX), cn(E::kY) - c(E::kY)), flat * std::cos(th), 1e-12);
-  EXPECT_NEAR(cn(E::kZ) - c(E::kZ), -c(E::kV) * std::sin(th) * dt, 1e-12);
-  EXPECT_GT(cn(E::kZ), c(E::kZ)) << "上り坂で z が増える";
 }
 
 TEST(EkfCore, TransitionJacobianMatchesNumerical)
@@ -489,6 +495,7 @@ struct SlopeResult
   double rms_xy;        // 収束後の base 水平位置誤差の rms [m]
   double bias_pitch;    // 収束後の車体 pitch 推定の平均誤差 [rad]
   double z_err_end;     // 最後の base z 誤差 [m]
+  double z_held;        // NDT を止めてから最後までの base z の推定の変化 [m]（ndt_off_from >= 0 のとき）
 };
 
 /// ndt_off_from 以降 NDT を止める（負なら止めない）。noise = 0 で観測ノイズなし
@@ -517,7 +524,8 @@ SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0)
       return n;
     };
 
-  double t0 = 1000.0, sq = 0.0, pitch_err = 0.0;
+  double t0 = 1000.0, sq = 0.0, pitch_err = 0.0, z_off = 0.0;
+  bool off_seen = false;
   Eigen::Vector2d sum = Eigen::Vector2d::Zero();
   int n = 0;
   SlopeResult res{};
@@ -537,6 +545,10 @@ SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0)
       ++n;
     }
     res.z_err_end = std::abs(e.z());
+    if (ndt_off_from >= 0 && tr >= ndt_off_from) {
+      if (!off_seen) {z_off = ekf.basePose().translation().z(); off_seen = true;}
+      res.z_held = std::abs(ekf.basePose().translation().z() - z_off);
+    }
   }
   res.bias_xy = (sum / n).norm();
   res.rms_xy = std::sqrt(sq / n);
@@ -561,12 +573,14 @@ TEST(NdtModel, SlopeHasNoLeverArmBias)
   EXPECT_LT(noisy.rms_xy, 0.1) << "観測ノイズ（各軸 sd 0.1 m）より小さい";
 }
 
-TEST(NdtModel, SlopeZFollowsDuringNdtOutage)
+TEST(NdtModel, SlopeZHeldDuringNdtOutage)
 {
-  // 10 s から 2 s 欠測。z 一定の予測なら v sin(slope) * 2 s = 0.17 m ずれる
+  // 水平面を移動すると仮定するので、予測では z を動かさない。10 s から 2 s 欠測すると、
+  // 坂では z が v sin(slope) * 2 s = 0.17 m 遅れる（NDT が戻れば観測で直る）
   const auto r = runSlope(12.0, 10.0);
-  std::printf("  傾斜 1/12・NDT 2 s 欠測後の z 誤差 %.3f m（z 一定なら 0.166 m）\n", r.z_err_end);
-  EXPECT_LT(r.z_err_end, 0.05);
+  std::printf("  傾斜 1/12・NDT 2 s 欠測：z の推定の変化 %.2e m、最後の z 誤差 %.3f m\n", r.z_held, r.z_err_end);
+  EXPECT_LT(r.z_held, 1e-9) << "欠測中の予測で z は動かない";
+  EXPECT_GT(r.z_err_end, 0.12);
 }
 
 // ===========================================================================
