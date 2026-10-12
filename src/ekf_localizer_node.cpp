@@ -62,6 +62,7 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
       std::bind(&EkfLocalizer::cloudReceived, this, std::placeholders::_1));
     return;
   }
+  if (cfg_.publish_trigger == "update") {return;}   // 観測で更新するたびに配信する（タイマーなし）
 
   // ROS 時刻のタイマー（use_sim_time ならシミュレーション時刻で回る）
   const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -91,6 +92,30 @@ bool EkfLocalizer::tryCreateFilter()
     cfg_.base_frame_id.c_str(), cfg_.lidar_frame_id.c_str(),
     t.x(), t.y(), t.z(), rpy(0), rpy(1), rpy(2));
   return true;
+}
+
+bool EkfLocalizer::filterReady()
+{
+  if (filter_.lagged) {return true;}
+  return cfg_.publish_trigger == "update" && tryCreateFilter();
+}
+
+double EkfLocalizer::measurementTime(const builtin_interfaces::msg::Time & stamp, double delay)
+{
+  const double t = (cfg_.time_source == "receipt") ?
+    now().seconds() : rclcpp::Time(stamp, RCL_ROS_TIME).seconds();
+  return t - delay;
+}
+
+void EkfLocalizer::publishUpdated()
+{
+  if (cfg_.publish_trigger != "update" || !filter_.lagged || !filter_.lagged->initialized()) {return;}
+  // 最新の状態は、最後に適用した観測の時刻の事後推定値（予測はその時刻まで）
+  const EkfCore & ekf = filter_.lagged->current();
+  const rclcpp::Time stamp = toTime(ekf.lastStamp());
+  if (stamp <= last_publish_stamp_) {return;}   // 遅れて届いた観測を巻き戻して入れたときは、最新の時刻が進まない
+  last_publish_stamp_ = stamp;
+  publish(ekf, stamp);
 }
 
 void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
@@ -133,7 +158,7 @@ void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
 void EkfLocalizer::ndtPoseReceived(
   const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg)
 {
-  if (!filter_.lagged) {return;}
+  if (!filterReady()) {return;}
 
   // NDT の解は map → LiDAR の姿勢。共分散は使わない（観測ノイズは R_ndt）
   const auto & p = msg->pose.pose;
@@ -145,14 +170,14 @@ void EkfLocalizer::ndtPoseReceived(
   z << p.position.x, p.position.y, p.position.z, roll, pitch, yaw;
 
   // 点群の取得時刻が stamp より ndt_delay だけ前のときに補う
-  const double stamp =
-    rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds() - cfg_.ndt_delay;
+  const double stamp = measurementTime(msg->header.stamp, cfg_.ndt_delay);
   addMeasurement(filter_.ndt->measurement(z, stamp));
+  publishUpdated();
 }
 
 void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr msg)
 {
-  if (!filter_.lagged || !filter_.odom) {return;}
+  if (!filterReady() || !filter_.odom) {return;}
 
   Eigen::Vector2d r = cfg_.odom.r;
   if (cfg_.odom_covariance_source == "message") {
@@ -171,9 +196,9 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
   const double v = msg->twist.twist.linear.x;
   const double omega = msg->twist.twist.angular.z;
   // twist が表す動きは stamp より odom_delay だけ前のもの（diff_drive_controller の移動平均など）
-  const double stamp =
-    rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds() - cfg_.odom_delay;
+  const double stamp = measurementTime(msg->header.stamp, cfg_.odom_delay);
   addMeasurement(filter_.odom->measurement(v, omega, r, stamp));
+  publishUpdated();
 }
 
 void EkfLocalizer::initialPoseReceived(

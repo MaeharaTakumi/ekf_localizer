@@ -23,11 +23,13 @@ namespace ekf_localizer
 ///         トピック名は ndt_pose_topic / odom_topic / initialpose_topic で変えられる
 ///   出力  ekf_pose（map → LiDAR）、ekf_odom（map → base、v, omega）、TF map → base
 ///
-///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。NDT は遅れて届くので、
-///   点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す。
+///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻は time_source で選ぶ。
+///     stamp    メッセージの stamp。NDT は遅れて届くので、点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す
+///     receipt  このノードが受信した時刻。届いた順に時刻が進むので、巻き戻しは起きない
 ///   出力は publish_trigger で選ぶ。
-///     timer  predict_rate の周期で、最新の状態を現在時刻まで予測して出す
-///     cloud  点群（points_topic）が届くたびに、その stamp の時刻の予測を出す
+///     timer   predict_rate の周期で、最新の状態を現在時刻まで予測して出す
+///     cloud   点群（points_topic）が届くたびに、その stamp の時刻の予測を出す
+///     update  NDT・オドメトリで更新するたびに、その観測の時刻の事後推定値を出す
 ///   取付 base → LiDAR は TF（静的）から読む。読めるまでは観測を捨てる。
 class EkfLocalizer : public rclcpp::Node
 {
@@ -42,8 +44,14 @@ private:
   void timerCallback();
   /// 取付 base → LiDAR を TF から読んで EKF を作る。作れたら true
   bool tryCreateFilter();
+  /// EKF ができていれば true。publish_trigger: update では観測が届いたときに作る（timer・cloud は配信のきっかけで作る）
+  bool filterReady();
+  /// 観測の時刻 [s]（time_source に従う。delay を引く）
+  double measurementTime(const builtin_interfaces::msg::Time & stamp, double delay);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
+  /// publish_trigger: update のとき、最新の状態（事後推定値）をその時刻で配信する
+  void publishUpdated();
   /// ekf の推定値を stamp の時刻として配信する
   void publish(const EkfCore & ekf, const rclcpp::Time & stamp);
 

@@ -25,8 +25,12 @@ struct EkfConfig
   std::string ndt_pose_topic{"ndt_pose"};
   std::string odom_topic{"odom"};
   std::string initialpose_topic{"initialpose"};
-  /// 配信のきっかけ："timer"（predict_rate の周期で現在時刻の予測）or "cloud"（点群の stamp の時刻の予測）
+  /// 配信のきっかけ："timer"（predict_rate の周期で現在時刻の予測）、"cloud"（点群の stamp の時刻の予測）、
+  /// "update"（NDT・オドメトリで更新するたびに、その時刻の事後推定値）
   std::string publish_trigger{"timer"};
+  /// 観測の時刻："stamp"（メッセージの stamp。遅れて届いた観測は巻き戻して入れ直す）or
+  /// "receipt"（このノードが受信した時刻。届いた順に処理され、巻き戻しは起きない）
+  std::string time_source{"stamp"};
   /// publish_trigger: "cloud" で購読する点群（stamp だけ使う）
   std::string points_topic{"velodyne_points"};
   /// 予測して配信する周期 [Hz]（publish_trigger: "timer"）

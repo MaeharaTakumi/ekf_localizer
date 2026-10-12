@@ -290,7 +290,17 @@ sequenceDiagram
   オドメトリで出るときは、オドメトリの通信の遅れか、NDT とオドメトリの時計のずれを疑ってください。
 - 遅れて届いた観測を入れ直した結果が、時刻順に処理した結果と一致することは、単体テスト `test/test_lagged_ekf.cpp` で確認しています。
 
-## 4. 配信（`timerCallback`、`predict_rate`）
+## 4. 配信（`publish_trigger`）
+
+| `publish_trigger` | いつ | 出す値 |
+|---|---|---|
+| `timer`（既定） | `predict_rate` の周期（下の図） | 最新の状態を現在時刻まで予測した値 |
+| `cloud` | 点群が届くたび | 点群の stamp の時刻の予測値（その点群の NDT はまだ入っていない。NDT の初期値にも使われる） |
+| `update` | NDT・オドメトリで更新するたび | 最新の状態（最後に適用した観測の時刻の事後推定値）。遅れて届いた NDT を巻き戻して入れたときは最新の時刻が進まないので出さない |
+
+観測の時刻は `time_source` で選びます（`stamp`：メッセージの stamp、`receipt`：受信した時刻で届いた順に処理）。
+
+`timer` の流れ：
 
 ```mermaid
 flowchart TD

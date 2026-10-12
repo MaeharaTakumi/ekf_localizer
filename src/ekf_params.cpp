@@ -14,6 +14,7 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("odom_topic", "odom");
   node.declare_parameter("initialpose_topic", "initialpose");
   node.declare_parameter("publish_trigger", "timer");
+  node.declare_parameter("time_source", "stamp");
   node.declare_parameter("points_topic", "velodyne_points");
   node.declare_parameter("predict_rate", 50.0);
   node.declare_parameter("history_length", 1.0);
@@ -72,7 +73,8 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   node.get_parameter("ndt_pose_topic", cfg.ndt_pose_topic);
   node.get_parameter("odom_topic", cfg.odom_topic);
   node.get_parameter("initialpose_topic", cfg.initialpose_topic);
-  choose("publish_trigger", cfg.publish_trigger, {"timer", "cloud"});
+  choose("publish_trigger", cfg.publish_trigger, {"timer", "cloud", "update"});
+  choose("time_source", cfg.time_source, {"stamp", "receipt"});
   node.get_parameter("points_topic", cfg.points_topic);
   node.get_parameter("predict_rate", cfg.predict_rate);
   if (!(cfg.predict_rate > 0.0)) {
@@ -146,6 +148,10 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     RCLCPP_INFO(
       logger, "ekf publish_trigger: cloud (%s), history_length: %lf s",
       cfg.points_topic.c_str(), cfg.history_length);
+  } else if (cfg.publish_trigger == "update") {
+    RCLCPP_INFO(
+      logger, "ekf publish_trigger: update (posterior after each NDT / odometry update), history_length: %lf s",
+      cfg.history_length);
   } else {
     RCLCPP_INFO(
       logger, "ekf publish_trigger: timer (%lf Hz), history_length: %lf s",
@@ -153,6 +159,9 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
   }
   RCLCPP_INFO(
     logger, "ekf gate_ndt: %lf (NDT observed as the base pose, 6 components at once)", nprm.gate);
+  RCLCPP_INFO(
+    logger, "ekf time_source: %s%s", cfg.time_source.c_str(),
+    cfg.time_source == "receipt" ? " (measurements are timed on receipt and processed in arrival order)" : "");
   RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", cprm.max_predict_dt);
   RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", cfg.ndt_delay);
   RCLCPP_INFO(
