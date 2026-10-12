@@ -25,7 +25,8 @@ namespace ekf_localizer
 ///
 ///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻は time_source で選ぶ。
 ///     stamp    メッセージの stamp。NDT は遅れて届くので、点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す
-///     receipt  このノードが受信した時刻。届いた順に時刻が進むので、巻き戻しは起きない
+///     receipt  受信した時刻。オドメトリはこのノードが受信した時刻、NDT はその点群（points_topic）を受信した時刻
+///              （NDT のノードに入っていたころと同じ。NDT は計算の分だけ遅れて届くので、点群の時刻まで巻き戻して入れる）
 ///   出力は publish_trigger で選ぶ。
 ///     timer   predict_rate の周期で、最新の状態を現在時刻まで予測して出す
 ///     cloud   点群（points_topic）が届くたびに、その stamp の時刻の予測を出す
@@ -46,8 +47,10 @@ private:
   bool tryCreateFilter();
   /// EKF ができていれば true。publish_trigger: update では観測が届いたときに作る（timer・cloud は配信のきっかけで作る）
   bool filterReady();
-  /// 観測の時刻 [s]（time_source に従う。delay を引く）
+  /// オドメトリの観測の時刻 [s]（time_source に従う。delay を引く）
   double measurementTime(const builtin_interfaces::msg::Time & stamp, double delay);
+  /// NDT の観測の時刻 [s]。receipt では、同じ stamp の点群を受信した時刻（無ければ NDT を受信した時刻）
+  double ndtTime(const builtin_interfaces::msg::Time & stamp);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
   /// publish_trigger: update のとき、最新の状態（事後推定値）をその時刻で配信する
@@ -62,6 +65,8 @@ private:
   std::map<const ObservationModel *, rclcpp::Time> too_old_warned_;
   /// 最後に配信した時刻（同じ時刻で 2 回出さない）
   rclcpp::Time last_publish_stamp_;
+  /// time_source: receipt で、点群の stamp [ns] → 受信した時刻 [s]（history_length より古いものは捨てる）
+  std::map<int64_t, double> cloud_receipt_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

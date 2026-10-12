@@ -34,7 +34,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 |---|---|---|
 | `use_odom` | true | オドメトリを観測に使うか。false なら NDT だけ（v, omega も NDT の姿勢の変化から推定）。コードの既定は false |
 | `publish_trigger` | `timer` | 配信のきっかけ。`timer`：`predict_rate` の周期で現在時刻まで予測した値 / `cloud`：点群（`points_topic`）が届くたびに、その stamp の時刻の予測値 / `update`：NDT・オドメトリで更新するたびに、その観測の時刻の事後推定値（NDT のノードに入っていたころの出し方） |
-| `time_source` | `stamp` | 観測の時刻。`stamp`：メッセージの stamp（遅れて届いた NDT は巻き戻して入れ直す）/ `receipt`：このノードが受信した時刻（届いた順に処理し、巻き戻さない）。`receipt` は `/ndt_pose` が NDT の計算の分（50〜70 ms）遅れた時刻の観測になるので、回転中に yaw が遅れる |
+| `time_source` | `stamp` | 観測の時刻。`stamp`：メッセージの stamp（遅れて届いた NDT は巻き戻して入れ直す）/ `receipt`：受信した時刻。オドメトリはこのノードが受信した時刻、NDT はその点群（`points_topic`）を受信した時刻（NDT のノードに入っていたころの `time_source: wall` と同じ。NDT は計算の分遅れて届くので、点群の時刻まで巻き戻して入れる） |
 | `predict_rate` | 50.0 | 予測して `ekf_pose`・`ekf_odom`・TF を配信する周期 [Hz]（`publish_trigger: timer`） |
 | `history_length` | 1.0 | 巻き戻しのために観測を保持する長さ [s]。NDT の遅れ（計算時間＋通信）より長くする |
 | `max_predict_dt` | 0.2 | 1 回の予測で進める時間の上限 [s]。下記 |

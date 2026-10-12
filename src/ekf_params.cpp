@@ -161,7 +161,8 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     logger, "ekf gate_ndt: %lf (NDT observed as the base pose, 6 components at once)", nprm.gate);
   RCLCPP_INFO(
     logger, "ekf time_source: %s%s", cfg.time_source.c_str(),
-    cfg.time_source == "receipt" ? " (measurements are timed on receipt and processed in arrival order)" : "");
+    cfg.time_source == "receipt" ?
+    " (odometry: receipt time, NDT: receipt time of its point cloud on points_topic)" : "");
   RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", cprm.max_predict_dt);
   RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", cfg.ndt_delay);
   RCLCPP_INFO(

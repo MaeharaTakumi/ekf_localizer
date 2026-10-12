@@ -6,7 +6,8 @@
       #   "update"（NDT・オドメトリで更新するたびに、その時刻の事後推定値。NDT のノードに入っていたころの出し方）
       publish_trigger: "timer"
       # 観測の時刻："stamp"（メッセージの stamp。遅れて届いた NDT は巻き戻して入れ直す）、
-      #   "receipt"（受信した時刻。届いた順に処理し巻き戻さない。NDT のノードに入っていたころの time_source: wall）
+      #   "receipt"（受信した時刻。オドメトリはこのノードが受信した時刻、NDT はその点群を受信した時刻。
+      #    NDT のノードに入っていたころの time_source: wall と同じ。NDT は計算の分遅れて届くので巻き戻して入れる）
       time_source: "stamp"
       points_topic: "velodyne_points"
       predict_rate: 20.0
