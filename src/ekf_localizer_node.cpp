@@ -126,10 +126,6 @@ void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
       RCLCPP_WARN(
         get_logger(), "%s %s rejected by gate (d2 = %lf, %d times in a row).",
         model.name(), st.name, st.d2, st.reject_count);
-    } else if (st.status == S::kReinitialized) {
-      RCLCPP_WARN(
-        get_logger(), "%s %s: lockout -> reinitialized to the observation (%lf).",
-        model.name(), st.name, st.reinitialized_to);
     }
   }
 }
@@ -232,14 +228,14 @@ void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
     tf_broadcaster_->sendTransform(tf);
   }
 
-  // /ekf_pose：map → LiDAR（NDT と同じ基準）。共分散は観測モデル h のヤコビアン J で J P J^T。
+  // /ekf_pose：map → LiDAR（NDT と同じ基準）。共分散は LiDAR の姿勢の状態に対するヤコビアン J で J P J^T。
   // 取付オフセットのレバーアームで roll・pitch・yaw の不確かさが位置に漏れる分が入る
   geometry_msgs::msg::PoseWithCovarianceStamped pose;
   pose.header.stamp = stamp;
   pose.header.frame_id = cfg_.map_frame_id;
   pose.pose.pose = tf2::toMsg(filter_.ndt->lidarPose(ekf.state()));
   const Eigen::Matrix<double, 6, 6> J =
-    filter_.ndt->observationJacobian(ekf.state()).leftCols<6>();
+    filter_.ndt->lidarPoseJacobian(ekf.state()).leftCols<6>();
   Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(pose.pose.covariance.data()) =
     J * P6 * J.transpose();
   ekf_pose_pub_->publish(pose);

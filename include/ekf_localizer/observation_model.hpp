@@ -32,7 +32,7 @@ using MeasurementPtr = std::shared_ptr<const Measurement>;
 /// 更新の 1 段の結果（観測モデルは更新を 1 段以上に分けて行う）
 struct StageResult
 {
-  enum class Status {kUpdated, kRejected, kReinitialized};
+  enum class Status {kUpdated, kRejected};
 
   /// 段の名前（ログ用。"x/y/yaw" など）
   const char * name{""};
@@ -40,8 +40,6 @@ struct StageResult
   double d2{0.0};
   /// この段の連続棄却回数（判定のあと）
   int reject_count{0};
-  /// kReinitialized のとき、合わせた観測値
-  double reinitialized_to{0.0};
 };
 
 /// 観測モデルのインターフェース（センサごとに 1 つ実装する）

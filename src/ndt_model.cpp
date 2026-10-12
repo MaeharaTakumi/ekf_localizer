@@ -8,15 +8,28 @@ namespace ekf_localizer
 namespace
 {
 
-/// 観測（LiDAR の [x, y, z, roll, pitch, yaw]）の成分が角度か
-bool isAngleObs(int i) {return i >= 3;}
+/// 姿勢の行列 → [x, y, z, roll, pitch, yaw]
+NdtModel::Vector6d poseVector(const Eigen::Affine3d & T)
+{
+  NdtModel::Vector6d v;
+  v.head<3>() = T.translation();
+  v.tail<3>() = rpyFromRotation(T.linear());
+  return v;
+}
 
-const char * const kStageNames[NdtModel::kNumStages] = {"x/y/yaw", "z", "roll", "pitch"};
+/// [x, y, z, roll, pitch, yaw] → 姿勢の行列
+Eigen::Affine3d poseMatrix(const NdtModel::Vector6d & v)
+{
+  Eigen::Affine3d T = Eigen::Affine3d::Identity();
+  T.linear() = rotationFromRpy(v(3), v(4), v(5));
+  T.translation() = v.head<3>();
+  return T;
+}
 
 }  // namespace
 
 NdtModel::NdtModel(const Params & p, const Eigen::Affine3d & mount, EkfCore & core)
-: prm_(p), mount_(mount), first_gate_(core.addGates(kNumStages))
+: prm_(p), mount_(mount), gate_(core.addGates(1))
 {
 }
 
@@ -26,8 +39,33 @@ MeasurementPtr NdtModel::measurement(const Vector6d & z_lidar, double stamp) con
 }
 
 // ---------------------------------------------------------------------------
-// 観測モデル
+// LiDAR の姿勢 ⇔ base の姿勢
 // ---------------------------------------------------------------------------
+
+NdtModel::Vector6d NdtModel::basePoseFromLidar(const Vector6d & z_lidar) const
+{
+  // T_B = T_L · T_BL⁻¹（厳密）
+  return poseVector(poseMatrix(z_lidar) * mount_.inverse());
+}
+
+NdtModel::Matrix6d NdtModel::baseCovariance(const Vector6d & z_lidar, const Vector6d & r_lidar) const
+{
+  // z_L → z_B のヤコビアン J を中心差分で求め、J diag(r) Jᵀ にする（1 次の伝播）。
+  // 位置の誤差はそのまま、姿勢の誤差は取付のレバーアーム分だけ base の位置に回るので、位置と姿勢に相関が出る
+  constexpr double kStep = 1.0e-6;
+  Matrix6d J;
+  for (int j = 0; j < 6; ++j) {
+    Vector6d zp = z_lidar;
+    Vector6d zm = z_lidar;
+    zp(j) += kStep;
+    zm(j) -= kStep;
+    Vector6d d = basePoseFromLidar(zp) - basePoseFromLidar(zm);
+    for (int i = 3; i < 6; ++i) {d(i) = normalizeAngle(d(i));}
+    J.col(j) = d / (2.0 * kStep);
+  }
+  const Matrix6d R = J * r_lidar.asDiagonal() * J.transpose();
+  return 0.5 * (R + R.transpose());
+}
 
 Eigen::Affine3d NdtModel::lidarPose(const EkfCore::StateVector & x) const
 {
@@ -35,150 +73,60 @@ Eigen::Affine3d NdtModel::lidarPose(const EkfCore::StateVector & x) const
   return EkfCore::poseFromState(x) * mount_;
 }
 
-NdtModel::Vector6d NdtModel::observe(const EkfCore::StateVector & x) const
+NdtModel::Matrix6xN NdtModel::lidarPoseJacobian(const EkfCore::StateVector & x) const
 {
-  const Eigen::Affine3d T_ml = lidarPose(x);
-  Vector6d h;
-  h.head<3>() = T_ml.translation();
-  h.tail<3>() = rpyFromRotation(T_ml.linear());
-  return h;
-}
-
-NdtModel::Matrix6xN NdtModel::observationJacobian(const EkfCore::StateVector & x) const
-{
-  // RPY 抽出が取付回転を含むと解析式が長くなるので中心差分で求める。h は v, omega に依存しない
+  // RPY 抽出が取付回転を含むと解析式が長くなるので中心差分で求める。LiDAR の姿勢は v, omega に依存しない
   constexpr double kStep = 1.0e-6;
-  Matrix6xN H = Matrix6xN::Zero();
+  Matrix6xN Jx = Matrix6xN::Zero();
   for (int j = 0; j < 6; ++j) {
     EkfCore::StateVector xp = x;
     EkfCore::StateVector xm = x;
     xp(j) += kStep;
     xm(j) -= kStep;
-    Vector6d d = observe(xp) - observe(xm);
+    Vector6d d = poseVector(lidarPose(xp)) - poseVector(lidarPose(xm));
     for (int i = 3; i < 6; ++i) {d(i) = normalizeAngle(d(i));}
-    H.col(j) = d / (2.0 * kStep);
+    Jx.col(j) = d / (2.0 * kStep);
   }
-  return H;
+  return Jx;
 }
 
 // ---------------------------------------------------------------------------
-// 初期化
+// 初期化・更新
 // ---------------------------------------------------------------------------
 
 std::optional<EkfCore::StateVector> NdtModel::initialState(const Measurement & m) const
 {
-  // LiDAR 姿勢 → base 姿勢（T_B = T_L · T_BL^-1、厳密）
-  const Vector6d z = m.z;
-  Eigen::Affine3d T_ml = Eigen::Affine3d::Identity();
-  T_ml.linear() = rotationFromRpy(z(3), z(4), z(5));
-  T_ml.translation() = z.head<3>();
-  const Eigen::Affine3d T_mb = T_ml * mount_.inverse();
-
   EkfCore::StateVector x0 = EkfCore::StateVector::Zero();
-  x0.head<3>() = T_mb.translation();
-  x0.segment<3>(EkfCore::kRoll) = rpyFromRotation(T_mb.linear());
+  x0.head<6>() = basePoseFromLidar(m.z);
   return x0;
-}
-
-// ---------------------------------------------------------------------------
-// 更新
-// ---------------------------------------------------------------------------
-
-template<int M>
-bool NdtModel::componentUpdate(
-  EkfCore & core, const Vector6d & z, const Vector6d & r, const int (&idx)[M], double gate,
-  double & d2_out) const
-{
-  const Vector6d h = observe(core.state());
-  const Matrix6xN H_full = observationJacobian(core.state());
-
-  Eigen::Matrix<double, M, 1> y;
-  Eigen::Matrix<double, M, EkfCore::kN> H;
-  Eigen::Matrix<double, M, M> R = Eigen::Matrix<double, M, M>::Zero();
-  for (int i = 0; i < M; ++i) {
-    y(i) = z(idx[i]) - h(idx[i]);
-    if (isAngleObs(idx[i])) {y(i) = normalizeAngle(y(i));}
-    H.row(i) = H_full.row(idx[i]);
-    R(i, i) = r(idx[i]);
-  }
-  return core.kalmanUpdate<M>(y, H, R, gate, d2_out);
-}
-
-StageResult NdtModel::scalarUpdate(
-  EkfCore & core, const Vector6d & z, const Vector6d & r, Stage stage, int obs_idx) const
-{
-  EkfCore::GateState & gate = core.gate(first_gate_ + stage);
-  StageResult res;
-  res.name = kStageNames[stage];
-
-  const int idx[1] = {obs_idx};
-  const bool accepted = componentUpdate<1>(core, z, r, idx, prm_.gate_1d, gate.last_d2);
-  res.d2 = gate.last_d2;
-  if (accepted) {
-    gate.reject_count = 0;
-    res.status = StageResult::Status::kUpdated;
-    return res;
-  }
-
-  ++gate.reject_count;
-  res.reject_count = gate.reject_count;
-  if (prm_.lockout_count <= 0 || gate.reject_count < prm_.lockout_count) {
-    res.status = StageResult::Status::kRejected;
-    return res;
-  }
-
-  // ロックアウト：真値が急に変わって古い値に張り付いたとみなし、観測値から出直す。
-  // LiDAR の z, roll, pitch（観測の添字 2, 3, 4）には base の同じ添字の状態がほぼ 1 対 1 で効くので、
-  // その状態だけを動かして観測に合わせる（ニュートン法で数回）。他成分との相関は捨てる
-  EkfCore::StateVector & x = core.mutableState();
-  EkfCore::StateMatrix & P = core.mutableCovariance();
-  const int s = obs_idx;
-  double h_ii = 1.0;
-  for (int iter = 0; iter < 3; ++iter) {
-    double y = z(obs_idx) - observe(x)(obs_idx);
-    if (isAngleObs(obs_idx)) {y = normalizeAngle(y);}
-    h_ii = observationJacobian(x)(obs_idx, s);
-    if (std::abs(h_ii) < 1.0e-3) {break;}   // 取付が極端で 1 対 1 でない場合は諦める
-    x(s) += y / h_ii;
-    EkfCore::wrapAngles(x);
-  }
-  P.row(s).setZero();
-  P.col(s).setZero();
-  P(s, s) = 2.0 * r(obs_idx) / (h_ii * h_ii);
-  gate.reject_count = 0;
-  res.reject_count = 0;
-  res.status = StageResult::Status::kReinitialized;
-  res.reinitialized_to = z(obs_idx);
-  return res;
 }
 
 std::vector<StageResult> NdtModel::update(EkfCore & core, const Measurement & m) const
 {
-  const Vector6d z = m.z;
-  const Vector6d r = m.r;
-  std::vector<StageResult> res(kNumStages);
+  const Vector6d z_lidar = m.z;
+  const Vector6d r_lidar = m.r;
 
-  // ---- 水平系 [x_L, y_L, yaw_L] ----
-  EkfCore::GateState & gate = core.gate(first_gate_ + kHorizontal);
-  const int horizontal[3] = {0, 1, 5};
-  StageResult & h = res[kHorizontal];
-  h.name = kStageNames[kHorizontal];
-  if (componentUpdate<3>(core, z, r, horizontal, prm_.gate_horizontal, gate.last_d2)) {
+  // base の姿勢の観測：残差 y = z_B - x[0:6]、H = [I 0]、R = J R_ndt Jᵀ
+  Vector6d y = basePoseFromLidar(z_lidar) - core.state().head<6>();
+  for (int i = 3; i < 6; ++i) {y(i) = normalizeAngle(y(i));}
+  Matrix6xN H = Matrix6xN::Zero();
+  H.leftCols<6>().setIdentity();
+  const Matrix6d R = baseCovariance(z_lidar, r_lidar);
+
+  EkfCore::GateState & gate = core.gate(gate_);
+  StageResult res;
+  res.name = "pose";
+  if (core.kalmanUpdate<6>(y, H, R, prm_.gate, gate.last_d2)) {
     gate.reject_count = 0;
-    h.status = StageResult::Status::kUpdated;
+    res.status = StageResult::Status::kUpdated;
   } else {
-    // 水平系は再初期化しない（誤収束した解に飛び移る危険があるため）
+    // 再初期化はしない（間違って収束した NDT の解に飛び移る危険があるため）
     ++gate.reject_count;
-    h.status = StageResult::Status::kRejected;
+    res.status = StageResult::Status::kRejected;
   }
-  h.d2 = gate.last_d2;
-  h.reject_count = gate.reject_count;
-
-  // ---- z, roll, pitch：それぞれ独立に判定する（水平系の結果に依存しない）----
-  res[kStageZ] = scalarUpdate(core, z, r, kStageZ, 2);
-  res[kStageRoll] = scalarUpdate(core, z, r, kStageRoll, 3);
-  res[kStagePitch] = scalarUpdate(core, z, r, kStagePitch, 4);
-  return res;
+  res.d2 = gate.last_d2;
+  res.reject_count = gate.reject_count;
+  return {res};
 }
 
 }  // namespace ekf_localizer

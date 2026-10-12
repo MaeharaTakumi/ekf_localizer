@@ -23,9 +23,7 @@
       R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3] # [x, y, z, roll, pitch, yaw]（LiDAR）
       R_odom: [2.5e-3, 5.0e-3]  # [v, omega]
 
-      gate_horizontal: 1.0e5
-      gate_1d: 1.0e5
-      lockout_count: 10
+      gate_ndt: 1.0e5
       ndt_delay: 0.0
 
       odom_covariance_source: "param"

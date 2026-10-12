@@ -28,9 +28,7 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("max_predict_dt", 0.2);
   node.declare_parameter(
     "P_init", std::vector<double>{2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6, 1.0, 1.0});
-  node.declare_parameter("gate_horizontal", 11.34);
-  node.declare_parameter("gate_1d", 6.63);
-  node.declare_parameter("lockout_count", 10);
+  node.declare_parameter("gate_ndt", 16.81);
   node.declare_parameter("ndt_delay", 0.0);
 
   // オドメトリ観測（use_odom: true のみ）
@@ -106,9 +104,7 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   if (load("R_ndt", 6, r_ndt)) {
     nprm.r = Eigen::Map<const NdtModel::Vector6d>(r_ndt.data());
   }
-  node.get_parameter("gate_horizontal", nprm.gate_horizontal);
-  node.get_parameter("gate_1d", nprm.gate_1d);
-  node.get_parameter("lockout_count", nprm.lockout_count);
+  node.get_parameter("gate_ndt", nprm.gate);
   node.get_parameter("ndt_delay", cfg.ndt_delay);
   if (!(cfg.ndt_delay >= 0.0) || cfg.ndt_delay >= cfg.history_length) {
     RCLCPP_WARN(
@@ -156,8 +152,7 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
       cfg.predict_rate, cfg.history_length);
   }
   RCLCPP_INFO(
-    logger, "ekf gate_horizontal: %lf, gate_1d: %lf, lockout_count: %d",
-    nprm.gate_horizontal, nprm.gate_1d, nprm.lockout_count);
+    logger, "ekf gate_ndt: %lf (NDT observed as the base pose, 6 components at once)", nprm.gate);
   RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", cprm.max_predict_dt);
   RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", cfg.ndt_delay);
   RCLCPP_INFO(

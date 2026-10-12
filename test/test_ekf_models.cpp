@@ -5,6 +5,7 @@
 
 #include <Eigen/Eigenvalues>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -318,14 +319,14 @@ TEST(EkfCore, TransitionJacobianMatchesNumerical)
 // NdtModel（NDT のみ）
 // ===========================================================================
 
-TEST(NdtModel, ObservationJacobianMatchesAnalytic)
+TEST(NdtModel, LidarPoseJacobianMatchesAnalytic)
 {
-  // 数値微分の H の位置部分を解析式と照合する：p_L = p_b + R(roll, pitch, yaw) o
+  // /ekf_pose の共分散に使う LiDAR の姿勢のヤコビアンの位置部分を解析式と照合する：p_L = p_b + R(roll, pitch, yaw) o
   const auto p = P0();
   Rig rig = makeRig(p, false);
   VS x;
   x << 1.0, -2.0, 0.3, 0.07, -0.12, 2.9, 0.9, 0.3;
-  const auto H = rig.ndt->observationJacobian(x);
+  const auto H = rig.ndt->lidarPoseJacobian(x);
   const double r = x(3), pt = x(4), y = x(5);
   const Eigen::Vector3d o(p.o_x, p.o_y, p.o_z);
   const auto skew = [](const Eigen::Vector3d & a) {
@@ -346,7 +347,7 @@ TEST(NdtModel, ObservationJacobianMatchesAnalytic)
   // 水平面（roll = pitch = 0）では旧 5 状態モデルの H と一致する
   VS xf = x;
   xf(3) = 0.0; xf(4) = 0.0;
-  const auto Hf = rig.ndt->observationJacobian(xf);
+  const auto Hf = rig.ndt->lidarPoseJacobian(xf);
   const double c = std::cos(y), s = std::sin(y);
   EXPECT_NEAR(Hf(0, 5), -p.o_x * s - p.o_y * c, 1e-8);
   EXPECT_NEAR(Hf(1, 5), p.o_x * c - p.o_y * s, 1e-8);
@@ -392,50 +393,101 @@ TEST(NdtModel, RecoversBaseLinkWhileTurning)
   EXPECT_TRUE(psdOK(ekf.covariance()));
 }
 
-TEST(NdtModel, OnlyZRejectedWhenZJumps)
+TEST(NdtModel, BaseObservationRoundTrip)
 {
+  // LiDAR の姿勢を base の姿勢に直す変換（T_L · T_BL⁻¹）は厳密
+  const auto p = P0();
+  Rig rig = makeRig(p, false);
+  const Eigen::Affine3d T_mb = makePose(3.0, -1.0, 0.4, 0.05, -0.08, 2.0);
+  V6 d = rig.ndt->basePoseFromLidar(lidarObs3d(*rig.ndt, T_mb)) - poseVec(T_mb);
+  for (int i = 3; i < 6; ++i) {d(i) = normalizeAngle(d(i));}
+  EXPECT_LT(d.cwiseAbs().maxCoeff(), 1e-12);
+}
+
+TEST(NdtModel, BaseCovarianceMatchesSampling)
+{
+  // LiDAR の姿勢に R_ndt のノイズを足して base に直したときのばらつきと、J R_ndt Jᵀ が合う
+  auto p = P0();
+  p.ndt.r << 1e-4, 4e-4, 2e-4, 1e-5, 1e-5, 2e-4;
+  Rig rig = makeRig(p, false);
+  const V6 zl = lidarObs3d(*rig.ndt, makePose(3.0, -1.0, 0.4, 0.03, -0.05, 2.0));
+  const auto R = rig.ndt->baseCovariance(zl, p.ndt.r);
+  const V6 zb = rig.ndt->basePoseFromLidar(zl);
+  std::mt19937 rng(7);
+  std::normal_distribution<double> n01(0.0, 1.0);
+  Eigen::Matrix<double, 6, 6> C = Eigen::Matrix<double, 6, 6>::Zero();
+  const int N = 200000;
+  for (int k = 0; k < N; ++k) {
+    V6 z = zl;
+    for (int i = 0; i < 6; ++i) {z(i) += std::sqrt(p.ndt.r(i)) * n01(rng);}
+    V6 d = rig.ndt->basePoseFromLidar(z) - zb;
+    for (int i = 3; i < 6; ++i) {d(i) = normalizeAngle(d(i));}
+    C += d * d.transpose();
+  }
+  C /= N;
+  for (int i = 0; i < 6; ++i) {
+    EXPECT_NEAR(C(i, i), R(i, i), 0.03 * R(i, i)) << "i=" << i;
+    for (int j = 0; j < i; ++j) {
+      EXPECT_NEAR(
+        C(i, j) / std::sqrt(C(i, i) * C(j, j)), R(i, j) / std::sqrt(R(i, i) * R(j, j)), 0.02)
+        << "i=" << i << " j=" << j;
+    }
+  }
+  EXPECT_TRUE(psdOK(R));
+
+  // 姿勢の誤差が取付のレバーアーム（高さ 1.2 m）で base の位置に回る。roll・pitch の分散が大きい今の R_ndt
+  // （位置 0.01、roll・pitch 0.03）では、base の水平位置の分散が LiDAR の何倍にもなり、roll・pitch と強く相関する
+  V6 r_now;
+  r_now << 1e-2, 1e-2, 1e-2, 0.03, 0.03, 1e-3;
+  const auto Rn = rig.ndt->baseCovariance(zl, r_now);
+  EXPECT_GT(Rn(0, 0) + Rn(1, 1), 3.0 * (r_now(0) + r_now(1)));
+  double max_corr = 0.0;
+  for (int i : {0, 1}) {
+    for (int j : {3, 4}) {max_corr = std::max(max_corr, std::abs(Rn(i, j)) / std::sqrt(Rn(i, i) * Rn(j, j)));}
+  }
+  EXPECT_GT(max_corr, 0.5) << "水平位置と roll・pitch の相関";
+}
+
+TEST(NdtModel, UpdateMatchesLidarFrameUpdate)
+{
+  // base の姿勢に直して更新した結果は、LiDAR の姿勢のまま（h(x) = T_B(x) T_BL、R = diag(R_ndt)）で
+  // 6 成分を 1 回で更新した結果と 1 次で一致する（違いは線形化する点が観測か予測かだけ）
   const auto p = P0();
   Rig rig = makeRig(p, false);
   double t = 1000;
-  rig.addNdt(lidarObs(p, 0, 0, 0), t);
-  for (int k = 0; k < 100; ++k) {t += 0.05; rig.addNdt(lidarObs(p, 0, 0, 0), t);}
-  const double z_before = lidarPose(rig).translation().z();
-  t += 0.05;
-  V6 bad = lidarObs(p, 0, 0, 0);
-  bad(2) += 0.8;
-  const auto r = rig.updateNdt(bad, t);
-  EXPECT_EQ(r[NdtModel::kHorizontal].status, SR::kUpdated);
-  EXPECT_EQ(r[NdtModel::kStageZ].status, SR::kRejected);
-  EXPECT_EQ(r[NdtModel::kStageRoll].status, SR::kUpdated);
-  EXPECT_EQ(r[NdtModel::kStagePitch].status, SR::kUpdated);
-  EXPECT_EQ(rig.ndt->gate(rig.core, NdtModel::kStageZ).reject_count, 1);
-  // 観測が予測と一致している roll, pitch の更新では状態は動かない
-  EXPECT_NEAR(lidarPose(rig).translation().z(), z_before, 1e-9);
-}
+  const Eigen::Affine3d T0 = makePose(2.0, 1.0, 0.0, 0.0, 0.0, 0.7);
+  rig.addNdt(lidarObs3d(*rig.ndt, T0), t);
+  t += 0.1;
+  rig.core.predictTo(t);
+  const VS x0 = rig.core.state();
+  const MS P = rig.core.covariance();
+  V6 z = lidarObs3d(*rig.ndt, T0);
+  z(0) += 0.02; z(1) -= 0.01; z(2) += 0.01; z(3) += 0.003; z(4) -= 0.002; z(5) += 0.01;
 
-TEST(NdtModel, LockoutReinitializesAfterStep)
-{
-  auto p = P0();
-  p.ndt.lockout_count = 10;
-  Rig rig = makeRig(p, false);
-  double t = 1000;
-  rig.addNdt(lidarObs(p, 0, 0, 0), t);
-  for (int k = 0; k < 100; ++k) {t += 0.05; rig.addNdt(lidarObs(p, 0, 0, 0), t);}
-  int reinit_at = -1;
-  for (int k = 1; k <= 30; ++k) {
-    t += 0.05;
-    V6 zz = lidarObs(p, 0, 0, 0);
-    zz(2) += 0.8;
-    const auto r = rig.updateNdt(zz, t);
-    if (reinit_at < 0 && r[NdtModel::kStageZ].status == SR::kReinitialized) {reinit_at = k;}
-  }
-  EXPECT_EQ(reinit_at, 10);
-  EXPECT_NEAR(lidarPose(rig).translation().z(), p.o_z + 0.8, 0.05);
+  V6 y = z - poseVec(rig.ndt->lidarPose(x0));
+  for (int i = 3; i < 6; ++i) {y(i) = normalizeAngle(y(i));}
+  const auto H = rig.ndt->lidarPoseJacobian(x0);
+  const Eigen::Matrix<double, 6, 6> S = H * P * H.transpose() + Eigen::Matrix<double, 6, 6>(p.ndt.r.asDiagonal());
+  const VS x_lidar = x0 + P * H.transpose() * S.inverse() * y;
+
+  const auto r = rig.updateNdt(z, t);
+  ASSERT_EQ(r.size(), 1u);
+  EXPECT_EQ(r[0].status, SR::kUpdated);
+  VS d = rig.core.state() - x_lidar;
+  for (int i = 3; i < 6; ++i) {d(i) = normalizeAngle(d(i));}
+  VS corr = x_lidar - x0;
+  std::printf(
+    "  LiDAR の座標の更新との差：位置 %.2e m・姿勢 %.2e rad（更新量 %.2e m・%.2e rad）\n",
+    d.head<3>().cwiseAbs().maxCoeff(), d.segment<3>(3).cwiseAbs().maxCoeff(),
+    corr.head<3>().cwiseAbs().maxCoeff(), corr.segment<3>(3).cwiseAbs().maxCoeff());
+  EXPECT_LT(d.head<3>().cwiseAbs().maxCoeff(), 0.05 * corr.head<3>().cwiseAbs().maxCoeff());
+  EXPECT_LT(d.segment<3>(3).cwiseAbs().maxCoeff(), 0.05 * corr.segment<3>(3).cwiseAbs().maxCoeff());
   EXPECT_TRUE(psdOK(rig.core.covariance()));
 }
 
-TEST(NdtModel, ScalarsIndependentOfHorizontalGate)
+TEST(NdtModel, WholePoseRejectedWhenOneComponentJumps)
 {
+  // 6 成分をまとめて判定するので、z だけが飛んでも観測全体を使わない（状態は変わらない）
   const auto p = P0();
   Rig rig = makeRig(p, false);
   double t = 1000;
@@ -443,13 +495,19 @@ TEST(NdtModel, ScalarsIndependentOfHorizontalGate)
   for (int k = 0; k < 100; ++k) {t += 0.05; rig.addNdt(lidarObs(p, 0, 0, 0), t);}
   t += 0.05;
   rig.core.predictTo(t);
-  V6 zz = lidarObs(p, 3.0, 0, 0);
-  zz(4) += 0.02;
-  const double pitch_before = rpyOf(lidarPose(rig).linear())(1);
-  const auto r = rig.updateNdt(zz, t);
-  EXPECT_EQ(r[NdtModel::kHorizontal].status, SR::kRejected);
-  EXPECT_EQ(r[NdtModel::kStagePitch].status, SR::kUpdated);
-  EXPECT_GT(rpyOf(lidarPose(rig).linear())(1), pitch_before + 1e-4);
+  const VS before = rig.core.state();
+  V6 bad = lidarObs(p, 0, 0, 0);
+  bad(2) += 0.8;
+  const auto r = rig.updateNdt(bad, t);
+  ASSERT_EQ(r.size(), 1u);
+  EXPECT_EQ(r[0].status, SR::kRejected);
+  EXPECT_GT(r[0].d2, p.ndt.gate);
+  EXPECT_EQ(rig.ndt->gate(rig.core).reject_count, 1);
+  EXPECT_LT((rig.core.state() - before).cwiseAbs().maxCoeff(), 1e-12);
+  // 次の正しい観測は通り、連続棄却の回数は 0 に戻る
+  t += 0.05;
+  EXPECT_EQ(rig.updateNdt(lidarObs(p, 0, 0, 0), t).at(0).status, SR::kUpdated);
+  EXPECT_EQ(rig.ndt->gate(rig.core).reject_count, 0);
 }
 
 TEST(NdtModel, StaticTfConsistent)

@@ -34,7 +34,7 @@ flowchart LR
 | `LaggedEkf` | `src/lagged_ekf.cpp` | 観測を時刻順に保持し、遅れて届いた観測を正しい位置に入れ直す。センサの種類は知らない |
 | `EkfCore` | `src/ekf_core.cpp` | EKF 本体。状態 x, P、予測、一般形の更新。センサの種類は知らない |
 | `ObservationModel` | `src/observation_model.cpp` | 観測モデルのインターフェースと、観測を 1 つ適用する共通の流れ（`applyMeasurement`、2 章） |
-| `NdtModel` | `src/ndt_model.cpp` | NDT の解の観測モデル（初期化、4 段の更新、ロックアウト） |
+| `NdtModel` | `src/ndt_model.cpp` | NDT の解の観測モデル（LiDAR の姿勢を base の姿勢に直して初期化・6 成分を 1 回で更新） |
 | `OdomModel` | `src/odom_model.cpp` | オドメトリの観測モデル（`use_odom: true` のときだけ作る） |
 
 ### クラスの関係
@@ -220,7 +220,7 @@ flowchart TD
   | h(x) | 状態 x から予測した観測値 |
   | H | h のヤコビアン（∂h/∂x） |
   | R | 観測ノイズ（分散） |
-  | γ | ゲート（`gate_horizontal`・`gate_1d`・`gate_odom`） |
+  | γ | ゲート（`gate_ndt`・`gate_odom`） |
 
   1. 残差：y = z − h(x)（角度の成分は −π〜π に収める）
   2. 残差の共分散：S = H P Hᵀ + R
@@ -234,13 +234,13 @@ flowchart TD
 | | NDT の解 | オドメトリ |
 |---|---|---|
 | 使うとき | 常に | `use_odom: true` のときだけ |
-| 観測値 z | LiDAR の姿勢 T_L を [x, y, z, roll, pitch, yaw] にしたもの | [v_o, omega_o]（前進速度・ヨー角速度） |
-| 予測した観測値 h(x) | T_B · T_BL を [x, y, z, roll, pitch, yaw] にしたもの | [v, omega]（状態の値） |
-| 観測ノイズ R | `R_ndt` | `R_odom`（メッセージの値も選べる） |
+| 観測値 z | LiDAR の姿勢 T_L を base の姿勢 T_L · T_BL⁻¹ に直し、[x, y, z, roll, pitch, yaw] にしたもの | [v_o, omega_o]（前進速度・ヨー角速度） |
+| 予測した観測値 h(x) | 状態の [x, y, z, roll, pitch, yaw]（H = [I 0]） | [v, omega]（状態の値） |
+| 観測ノイズ R | `R_ndt`（LiDAR）を base の姿勢に直したもの J R_ndt Jᵀ（相関込みの 6×6） | `R_odom`（メッセージの値も選べる） |
 | 遅れ t_d | `ndt_delay`（既定 0） | `odom_delay` |
-| 更新の分け方 | 4 段に分けて、段ごとに判定・更新 | v, omega をまとめて 1 回 |
-| ゲート | `gate_horizontal`・`gate_1d` | `gate_odom` |
-| 棄却が続いたとき | z・roll・pitch は観測値で再初期化。水平は何もしない | 何もしない |
+| 更新の分け方 | 6 成分をまとめて 1 回 | v, omega をまとめて 1 回 |
+| ゲート | `gate_ndt` | `gate_odom` |
+| 棄却が続いたとき | 何もしない（WARN だけ） | 何もしない |
 | 未初期化のとき | この値で初期化する | 値を覚えておく（初期化で使う） |
 
 ### NDT の解だけの内容
@@ -249,16 +249,13 @@ flowchart TD
 - **初期化**：T_B = T_L · T_BL⁻¹ で状態の位置・姿勢を作り、P = diag(`P_init`)、t_x = t_z とします。
   v・omega は 0 から始めます。ただし `use_odom: true` で、覚えているオドメトリの時刻 t_o が |t_z − t_o| ≤ `odom_timeout_init`（0.2 秒）なら、
   v = v_o、omega = omega_o とし、その分散を観測ノイズの値にします（`EKF initialized by NDT (v, omega = ... from Odometry)`）。
-- **4 段の更新**：共通の流れの判定・更新を、成分を分けて順に行います。
-
-  | 段 | 対象 | ゲート（既定） | 棄却が続いたとき |
-  |---|---|---|---|
-  | 1 | [x, y, yaw] をまとめて | `gate_horizontal` 11.34（χ²(3)、99%） | 何もしない（WARN だけ）。間違って収束した NDT の解に飛び移らないため |
-  | 2 | z | `gate_1d` 6.63（χ²(1)、99%） | `lockout_count`（10）回続いたら、z だけを観測値に合わせて再初期化 |
-  | 3 | roll | 同上 | 同上 |
-  | 4 | pitch | 同上 | 同上 |
-
-  各段は独立に判定します（水平が棄却されても z・roll・pitch は更新されます）。
+- **base の姿勢に直した更新**：観測には LiDAR の姿勢と `R_ndt` をそのまま持ち、更新のたびに次のように直して、
+  共通の流れの判定・更新を 6 成分まとめて 1 回で行います（ゲート `gate_ndt`、既定 16.81 = χ²(6) の 99%）。
+  - 観測値：z_B = T_L · T_BL⁻¹ を [x, y, z, roll, pitch, yaw] にしたもの（厳密）。h(x) は状態の先頭 6 成分、H = [I 0]
+  - 観測ノイズ：R = J diag(`R_ndt`) Jᵀ。J は z_L → z_B のヤコビアン（中心差分）。LiDAR は base から離れている（高さ約 1.1 m）ので、
+    LiDAR の roll・pitch の誤差が base の x, y に回り、位置と姿勢の相関が入る
+  - 1 次の近似では、LiDAR の姿勢のまま（h(x) = T_B · T_BL）更新するのと同じ情報で、違いは線形化する点（観測か予測か）だけ
+  - 棄却が続いても再初期化はしません（間違って収束した NDT の解に飛び移らないため）
 
 ### オドメトリだけの内容
 
@@ -338,7 +335,7 @@ flowchart TD
 
 ## 既知の制限
 
-- **オドメトリと NDT の水平系には、棄却が続いたときに回復する仕組みがありません。** `Q` が実際の動きに対して小さいと、棄却が続いたまま戻らなくなります（z、roll、pitch には `lockout_count` による再初期化があります）。
+- **オドメトリと NDT には、棄却が続いたときに回復する仕組みがありません。** `Q` が実際の動きに対して小さいと、棄却が続いたまま戻らなくなります。
   オドメトリの遅れ（`odom_delay`）を補っていないときや、車輪の滑りが大きいときに、yaw の `Q` を小さくするとこの状態になります。
 - 旋回の反転のように omega が段差で変わる瞬間は、オドメトリに現れるまで（移動平均で約 0.1 s）予測が追いつかず、
   その間だけ yaw が数度ずれます（Gazebo の反転で約 5°、0.15 s）。
