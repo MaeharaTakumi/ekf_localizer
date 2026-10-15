@@ -35,7 +35,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | `use_odom` | true | オドメトリを観測に使うか。false なら NDT だけ（v, omega も NDT の姿勢の変化から推定）。コードの既定は false |
 | `publish_trigger` | `timer` | 配信のきっかけ。`timer`：`predict_rate` の周期で現在時刻まで予測した値 / `cloud`：点群（`points_topic`）が届くたびに、その stamp の時刻の予測値 / `update`：NDT・オドメトリで更新するたびに、その観測の時刻の事後推定値（NDT のノードに入っていたころの出し方） |
 | `time_source` | `stamp` | 観測の時刻。`stamp`：メッセージの stamp（遅れて届いた NDT は巻き戻して入れ直す）/ `receipt`：受信した時刻。オドメトリはこのノードが受信した時刻、NDT はその点群（`points_topic`）を受信した時刻（NDT のノードに入っていたころの `time_source: wall` と同じ。NDT は計算の分遅れて届くので、点群の時刻まで巻き戻して入れる） |
-| `predict_rate` | 50.0 | 予測して `ekf_pose`・`ekf_odom`・TF を配信する周期 [Hz]（`publish_trigger: timer`） |
+| `predict_rate` | 20.0 | 予測して `ekf_pose`・`ekf_odom`・TF を配信する周期 [Hz]（`publish_trigger: timer`。コードの既定は 50.0） |
 | `history_length` | 1.0 | 巻き戻しのために観測を保持する長さ [s]。NDT の遅れ（計算時間＋通信）より長くする |
 | `max_predict_dt` | 0.2 | 1 回の予測で進める時間の上限 [s]。下記 |
 | `publish_tf` | true | `map_frame_id` → `base_frame_id` の TF を配信するか |
@@ -70,16 +70,16 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | 名前 | 値 | 説明 |
 |---|---|---|
 | `ndt_delay` | 0.0 | NDT の遅れ [s]。点群の取得時刻が stamp より前の分を、stamp から引いて補う。`[0, history_length)` の範囲 |
-| `gate_ndt` | 16.81 | NDT のゲート（χ²(6) の 99%）。NDT の解は base の姿勢に直して 6 成分を 1 回で更新するので、どれか 1 成分が大きくずれても観測全体を使わない |
+| `gate_ndt` | 1.0e5 | NDT のゲート（マハラノビス距離の 2 乗の上限。1.0e5 は実質無効。χ²(6) の 99% は 16.81 で、コードの既定）。NDT の解は base の姿勢に直して 6 成分を 1 回で更新するので、ゲートを効かせると、どれか 1 成分が大きくずれても観測全体を使わない |
 
 ### オドメトリ（`use_odom: true` のみ）
 
 | 名前 | 値 | 説明 |
 |---|---|---|
 | `odom_covariance_source` | `param` | 観測ノイズの出どころ。`param`：`R_odom` / `message`：`twist.covariance[0]`・`[35]`（正でなければ `R_odom`） |
-| `gate_odom` | 1.0e9 | オドメトリのゲート（χ²(2) の 99% は 9.21。1.0e9 は実質無効） |
+| `gate_odom` | 1.0e5 | オドメトリのゲート（1.0e5 は実質無効。χ²(2) の 99% は 9.21 で、コードの既定） |
 | `odom_timeout_init` | 0.2 | 初期化のとき、この時間以内のオドメトリがあれば v, omega をその値から始める [s] |
-| `odom_delay` | 0.09 | オドメトリの遅れ [s]。stamp から引いて補う。`[0, history_length)` の範囲 |
+| `odom_delay` | 0.0 | オドメトリの遅れ [s]。stamp（`time_source: receipt` なら受信した時刻）から引いて補う。`[0, history_length)` の範囲 |
 
 ## テスト
 
