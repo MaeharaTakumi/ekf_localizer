@@ -14,6 +14,8 @@
       history_length: 1.0
       max_predict_dt: 0.2
       publish_tf: true
+      # NDT で更新した直後の値（点群の時刻の事後推定値）を TF map → base として tf_ndt_update に出す（RViz の点群の表示用）
+      publish_ndt_update_tf: true
 
       ndt_pose_topic: "ndt_pose"
       odom_topic: "odom"

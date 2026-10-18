@@ -318,3 +318,35 @@ TEST(LaggedEkf, AtUsesOnlyMeasurementsUpToT)
   // current() は変えない
   EXPECT_GT(lagged.current().lastStamp(), kT0 + 0.905);
 }
+
+TEST(LaggedEkf, StateAfterIsPosteriorOfThatNdt)
+{
+  // 遅れて届いた NDT を入れた直後の stateAfter(m) は、m 以前の観測だけで求めた状態に m を適用したもの
+  // （at(t_m) と同じ。後続のオドメトリで変わる current() とは違う）
+  const std::vector<Meas> ms = scenario(0.15, 1.0);
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 1.0);
+  std::vector<Meas> sorted = ms;
+  std::stable_sort(
+    sorted.begin(), sorted.end(), [](const Meas & a, const Meas & b) {return a.arrival < b.arrival;});
+  int checked = 0, replayed = 0;
+  for (const Meas & meas : sorted) {
+    const auto m = toMeasurement(f, meas);
+    lagged.add(m);
+    if (!meas.ndt || meas.stamp < kT0 + 0.3) {continue;}
+    const std::optional<EkfCore> post = lagged.stateAfter(m);
+    ASSERT_TRUE(post.has_value());
+    std::vector<Meas> upto;
+    std::copy_if(
+      ms.begin(), ms.end(), std::back_inserter(upto),
+      [&meas](const Meas & x) {return x.stamp <= meas.stamp;});
+    expectSameState(*post, runInOrder(upto));
+    expectSameState(*post, lagged.at(meas.stamp));
+    if (lagged.current().lastStamp() > meas.stamp) {++replayed;}   // 後続のオドメトリを適用し直した
+    ++checked;
+  }
+  EXPECT_GE(checked, 6);
+  EXPECT_GE(replayed, checked - 1);   // 最後の NDT の後にはオドメトリが無い
+  // 履歴に無い観測は nullopt
+  EXPECT_FALSE(lagged.stateAfter(f.ndt->measurement(V6::Zero(), kT0)).has_value());
+}

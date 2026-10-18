@@ -36,6 +36,15 @@ EkfCore LaggedEkf::at(double t) const
   return ekf;
 }
 
+std::optional<EkfCore> LaggedEkf::stateAfter(const MeasurementPtr & m) const
+{
+  // 遅れて届く NDT は履歴の後ろの方にあるので、後ろから探す
+  for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+    if (it->m == m) {return it->state;}
+  }
+  return std::nullopt;
+}
+
 void LaggedEkf::reset()
 {
   // 最新の状態から始める（初期化用の観測は残り、次の初期化で使う）

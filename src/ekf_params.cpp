@@ -19,6 +19,7 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("predict_rate", 50.0);
   node.declare_parameter("history_length", 1.0);
   node.declare_parameter("publish_tf", true);
+  node.declare_parameter("publish_ndt_update_tf", false);
   node.declare_parameter("map_frame_id", "map");
   node.declare_parameter("base_frame_id", "base_link");
   node.declare_parameter("lidar_frame_id", "velodyne");
@@ -87,6 +88,7 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
     cfg.history_length = 1.0;
   }
   node.get_parameter("publish_tf", cfg.publish_tf);
+  node.get_parameter("publish_ndt_update_tf", cfg.publish_ndt_update_tf);
   node.get_parameter("map_frame_id", cfg.map_frame_id);
   node.get_parameter("base_frame_id", cfg.base_frame_id);
   node.get_parameter("lidar_frame_id", cfg.lidar_frame_id);
@@ -141,9 +143,9 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     logger, "ekf topics: ndt_pose: %s, odom: %s, initialpose: %s",
     cfg.ndt_pose_topic.c_str(), cfg.odom_topic.c_str(), cfg.initialpose_topic.c_str());
   RCLCPP_INFO(
-    logger, "ekf frames: %s -> %s (lidar: %s), publish_tf: %d",
+    logger, "ekf frames: %s -> %s (lidar: %s), publish_tf: %d, publish_ndt_update_tf: %d",
     cfg.map_frame_id.c_str(), cfg.base_frame_id.c_str(), cfg.lidar_frame_id.c_str(),
-    cfg.publish_tf);
+    cfg.publish_tf, cfg.publish_ndt_update_tf);
   if (cfg.publish_trigger == "cloud") {
     RCLCPP_INFO(
       logger, "ekf publish_trigger: cloud (%s), history_length: %lf s",

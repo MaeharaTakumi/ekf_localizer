@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <optional>
 
 #include "ekf_localizer/ekf_core.hpp"
 #include "ekf_localizer/observation_model.hpp"
@@ -60,6 +61,9 @@ public:
   /// 時刻 t の状態：t 以前の最後の観測を適用した直後の状態を t まで予測したコピー。
   /// t より新しい観測は使わない（t が起点より古ければ起点の状態のまま）
   EkfCore at(double t) const;
+  /// 観測 m を適用した直後の状態（m の時刻の事後推定値。後から m より前に入った観測も反映したもの）。
+  /// m が履歴に無い（古すぎて捨てた・起点に畳み込んだ）なら nullopt
+  std::optional<EkfCore> stateAfter(const MeasurementPtr & m) const;
   std::size_t historySize() const {return history_.size();}
   double historyLength() const {return history_length_;}
   /// 最新の観測の時刻。履歴が空なら起点の時刻（リセット直後は -inf）

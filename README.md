@@ -21,6 +21,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | 出力 | `ekf_pose` | geometry_msgs/PoseWithCovarianceStamped | map → LiDAR（共分散は観測モデルで伝播） |
 | 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v, omega |
 | 出力 | TF | | `map_frame_id` → `base_frame_id`（`publish_tf`） |
+| 出力 | `tf_ndt_update` | tf2_msgs/TFMessage | NDT で更新した直後の `map_frame_id` → `base_frame_id`（その点群の時刻の事後推定値。stamp は点群の取得時刻。`publish_ndt_update_tf`）。RViz の `/tf` をこれに付け替えると、点群を同じ時刻の EKF の NDT の更新値で表示できる |
 
 購読するトピック名はパラメータで変えられます（リマップでも変えられます）。
 
@@ -39,6 +40,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | `history_length` | 1.0 | 巻き戻しのために観測を保持する長さ [s]。NDT の遅れ（計算時間＋通信）より長くする |
 | `max_predict_dt` | 0.2 | 1 回の予測で進める時間の上限 [s]。下記 |
 | `publish_tf` | true | `map_frame_id` → `base_frame_id` の TF を配信するか |
+| `publish_ndt_update_tf` | true | NDT で更新した直後の値を `tf_ndt_update` に配信するか（`/tf` は配信のきっかけの値のまま。NDT の初期値にも使うので変えない）。コードの既定は false |
 
 `max_predict_dt`：前の状態からの間隔がこれを超えると、動かすのはこの時間分だけにして、時刻は最後まで進めます
 （共分散もこの時間分しか増やしません）。オドメトリ（50 Hz）や NDT（約 10 Hz）が届いている間は効きません。

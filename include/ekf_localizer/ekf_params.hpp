@@ -39,6 +39,10 @@ struct EkfConfig
   double history_length{1.0};
   /// map → base_frame_id の TF を配信するか
   bool publish_tf{true};
+  /// NDT で更新した直後の状態（点群の時刻の事後推定値）を、map → base_frame_id の TF として
+  /// tf_ndt_update（tf2_msgs/TFMessage）に配信するか。RViz の /tf をこれに付け替えると、点群を同じ時刻の
+  /// EKF の NDT の更新値で表示できる（/tf は配信のきっかけの値で、NDT の初期値にも使うので変えない）
+  bool publish_ndt_update_tf{false};
   std::string map_frame_id{"map"};
   std::string base_frame_id{"base_link"};
   /// NDT が推定する LiDAR のフレーム（取付 base → LiDAR は TF から読む）
