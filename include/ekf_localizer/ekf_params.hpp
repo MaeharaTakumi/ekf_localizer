@@ -43,6 +43,13 @@ struct EkfConfig
   /// tf_ndt_update（tf2_msgs/TFMessage）に配信するか。RViz の /tf をこれに付け替えると、点群を同じ時刻の
   /// EKF の NDT の更新値で表示できる（/tf は配信のきっかけの値で、NDT の初期値にも使うので変えない）
   bool publish_ndt_update_tf{false};
+  /// 現在時刻まで予測した map → base_frame_id を base_pose に配信する周期 [Hz]。0 なら配信しない。
+  /// publish_trigger と別のタイマー（TF・ekf_pose の出し方は変えない）
+  double base_pose_rate{0.0};
+  /// NDT で更新した直後の状態（点群の時刻の事後推定値）を、map → LiDAR として vlp16_pose に配信するか
+  bool publish_vlp16_pose{false};
+  /// NDT で更新したときに、同じ stamp の点群（points_topic）を vlp16_points に出し直すか（vlp16_pose と組にする）
+  bool publish_vlp16_points{false};
   std::string map_frame_id{"map"};
   std::string base_frame_id{"base_link"};
   /// NDT が推定する LiDAR のフレーム（取付 base → LiDAR は TF から読む）

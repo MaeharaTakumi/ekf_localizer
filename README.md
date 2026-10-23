@@ -22,6 +22,9 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v, omega |
 | 出力 | TF | | `map_frame_id` → `base_frame_id`（`publish_tf`） |
 | 出力 | `tf_ndt_update` | tf2_msgs/TFMessage | NDT で更新した直後の `map_frame_id` → `base_frame_id`（その点群の時刻の事後推定値。stamp は点群の取得時刻。`publish_ndt_update_tf`）。RViz の `/tf` をこれに付け替えると、点群を同じ時刻の EKF の NDT の更新値で表示できる |
+| 出力 | `base_pose` | geometry_msgs/PoseWithCovarianceStamped | 現在時刻まで予測した map → base（共分散は base の 6x6）。`base_pose_rate` の周期で、`publish_trigger` とは別のタイマー。MATLAB 用 |
+| 出力 | `vlp16_pose` | geometry_msgs/PoseWithCovarianceStamped | NDT で更新した直後の map → LiDAR（`tf_ndt_update` と同じ状態。共分散は `ekf_pose` と同じ求め方）。stamp は点群の取得時刻。`publish_vlp16_pose`。MATLAB 用 |
+| 出力 | `vlp16_points` | sensor_msgs/PointCloud2 | `vlp16_pose` を出した直後に、同じ stamp の点群（`points_topic`）をそのまま出し直す。購読側は 2 つの stamp が同じなら組にする（届く順は入れ替わることがある）。`publish_vlp16_points`。MATLAB 用 |
 
 購読するトピック名はパラメータで変えられます（リマップでも変えられます）。
 
@@ -41,6 +44,13 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | `max_predict_dt` | 0.2 | 1 回の予測で進める時間の上限 [s]。下記 |
 | `publish_tf` | true | `map_frame_id` → `base_frame_id` の TF を配信するか |
 | `publish_ndt_update_tf` | true | NDT で更新した直後の値を `tf_ndt_update` に配信するか（`/tf` は配信のきっかけの値のまま。NDT の初期値にも使うので変えない）。コードの既定は false |
+| `base_pose_rate` | 50.0 | 現在時刻まで予測した map → base を `base_pose` に配信する周期 [Hz]。0 なら配信しない。`publish_trigger` のタイマーとは別なので、TF・`ekf_pose` の出し方（NDT の初期値）は変わらない。コードの既定は 0.0 |
+| `publish_vlp16_pose` | true | NDT で更新した直後の map → LiDAR を `vlp16_pose` に配信するか。コードの既定は false |
+| `publish_vlp16_points` | true | NDT で更新したときに、同じ stamp の点群を `vlp16_points` に出し直すか。届いた点群を `history_length` だけ持っておき、NDT が解かなかった点群は捨てる。コードの既定は false |
+
+`base_pose` は、届いた観測をすべて入れた最新の状態を現在時刻まで予測した値です（`publish_trigger: timer` と同じ計算）。
+点群の時刻の NDT は約 50 ms 遅れて届き、その時刻まで巻き戻して入れるので、NDT が届いた直後の `base_pose` は
+その分だけ跳ねます。観測が `max_predict_dt` より長く途切れると、それ以上は進みません（下記）。
 
 `max_predict_dt`：前の状態からの間隔がこれを超えると、動かすのはこの時間分だけにして、時刻は最後まで進めます
 （共分散もこの時間分しか増やしません）。オドメトリ（50 Hz）や NDT（約 10 Hz）が届いている間は効きません。

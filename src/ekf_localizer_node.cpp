@@ -27,7 +27,8 @@ using Status = LaggedEkf::Status;
 
 EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
 : rclcpp::Node("ekf_localizer", options),
-  last_publish_stamp_(0, 0, RCL_ROS_TIME)
+  last_publish_stamp_(0, 0, RCL_ROS_TIME),
+  last_base_pose_stamp_(0, 0, RCL_ROS_TIME)
 {
   declareEkfParameters(*this);
   cfg_ = loadEkfConfig(*this);
@@ -59,13 +60,34 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
     ndt_update_tf_pub_ = create_publisher<tf2_msgs::msg::TFMessage>(
       "tf_ndt_update", rclcpp::QoS(rclcpp::KeepLast(100)).reliable());
   }
+  // base_pose・vlp16_pose・vlp16_points は MATLAB などが購読する。reliable は reliable / best effort どちらの
+  // 購読とも接続できる
+  if (cfg_.base_pose_rate > 0.0) {
+    base_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "base_pose", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
+  }
+  if (cfg_.publish_vlp16_pose) {
+    vlp16_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "vlp16_pose", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+  }
+  if (cfg_.publish_vlp16_points) {
+    vlp16_points_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+      "vlp16_points", rclcpp::QoS(rclcpp::KeepLast(2)).reliable());
+  }
 
-  if (cfg_.publish_trigger == "cloud" || cfg_.time_source == "receipt") {
-    // 点群は stamp（と receipt では受信した時刻）しか使わない。best effort は reliable / best effort どちらの
-    // publisher とも接続できる
+  if (cfg_.publish_trigger == "cloud" || cfg_.time_source == "receipt" || cfg_.publish_vlp16_points) {
+    // 点群は stamp（と receipt では受信した時刻）を使い、publish_vlp16_points では出し直すために持っておく。
+    // best effort は reliable / best effort どちらの publisher とも接続できる
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       cfg_.points_topic, rclcpp::SensorDataQoS(),
       std::bind(&EkfLocalizer::cloudReceived, this, std::placeholders::_1));
+  }
+  if (cfg_.base_pose_rate > 0.0) {
+    // publish_trigger のタイマーとは別（ROS 時刻。use_sim_time ならシミュレーション時刻で回る）
+    const auto base_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(1.0 / cfg_.base_pose_rate));
+    base_pose_timer_ = rclcpp::create_timer(
+      this, get_clock(), base_period, std::bind(&EkfLocalizer::basePoseTimerCallback, this));
   }
   if (cfg_.publish_trigger != "timer") {return;}   // cloud・update はタイマーなし
 
@@ -200,18 +222,30 @@ void EkfLocalizer::ndtPoseReceived(
 
 void EkfLocalizer::publishNdtUpdate(const MeasurementPtr & m, const rclcpp::Time & stamp)
 {
-  if (!ndt_update_tf_pub_) {return;}
+  // この点群を取り出し、それ以前の点群（NDT が解かなかったもの。NDT の解は stamp の順に届く）は捨てる
+  sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud;
+  if (vlp16_points_pub_) {
+    const auto it = held_clouds_.find(stamp.nanoseconds());
+    if (it != held_clouds_.end()) {cloud = it->second;}
+    held_clouds_.erase(held_clouds_.begin(), held_clouds_.upper_bound(stamp.nanoseconds()));
+  }
+  if (!ndt_update_tf_pub_ && !vlp16_pose_pub_ && !vlp16_points_pub_) {return;}
   const std::optional<EkfCore> ekf = filter_.lagged->stateAfter(m);
   if (!ekf || !ekf->initialized()) {return;}   // 古すぎて捨てた観測
   // 状態は観測の時刻（ndtTime）のもの。stamp は RViz が点群を引く時刻（点群の stamp）にする
   // （time_source: stamp・ndt_delay 0 なら同じ時刻）
-  geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf->basePose());
-  tf.header.stamp = stamp;
-  tf.header.frame_id = cfg_.map_frame_id;
-  tf.child_frame_id = cfg_.base_frame_id;
-  tf2_msgs::msg::TFMessage out;
-  out.transforms.push_back(tf);
-  ndt_update_tf_pub_->publish(out);
+  if (ndt_update_tf_pub_) {
+    geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf->basePose());
+    tf.header.stamp = stamp;
+    tf.header.frame_id = cfg_.map_frame_id;
+    tf.child_frame_id = cfg_.base_frame_id;
+    tf2_msgs::msg::TFMessage out;
+    out.transforms.push_back(tf);
+    ndt_update_tf_pub_->publish(out);
+  }
+  // 姿勢を先に出し、続けて同じ stamp の点群を出す（購読側は 2 つの stamp が同じなら組にする）
+  if (vlp16_pose_pub_) {vlp16_pose_pub_->publish(lidarPoseMsg(*ekf, stamp));}
+  if (cloud) {vlp16_points_pub_->publish(*cloud);}
 }
 
 void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr msg)
@@ -260,6 +294,15 @@ void EkfLocalizer::cloudReceived(const sensor_msgs::msg::PointCloud2::ConstShare
       cloud_receipt_.erase(cloud_receipt_.begin());
     }
   }
+  if (vlp16_points_pub_) {
+    // NDT で更新したら vlp16_points に出し直すので、stamp ごとに持っておく（NDT の解が来なかったものは
+    // history_length で捨てる。時刻が history_length より戻ったら（録画の再生のやり直しなど）全部捨てる）
+    const int64_t key = rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).nanoseconds();
+    const auto history = static_cast<int64_t>(cfg_.history_length * 1e9);
+    if (!held_clouds_.empty() && held_clouds_.rbegin()->first - key > history) {held_clouds_.clear();}
+    held_clouds_[key] = msg;
+    while (key - held_clouds_.begin()->first > history) {held_clouds_.erase(held_clouds_.begin());}
+  }
   if (cfg_.publish_trigger != "cloud") {return;}
 
   if (!filter_.lagged && !tryCreateFilter()) {return;}
@@ -289,20 +332,36 @@ void EkfLocalizer::timerCallback()
   publish(filter_.lagged->predicted(t), stamp);
 }
 
-void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
+void EkfLocalizer::basePoseTimerCallback()
 {
-  const Eigen::Affine3d T_mb = ekf.basePose();
-  const auto P6 = ekf.covariance().topLeftCorner<6, 6>();
+  // EKF は配信のきっかけ（publish_trigger）や観測の側で作る
+  if (!filter_.lagged || !filter_.lagged->initialized()) {return;}
 
-  if (cfg_.publish_tf) {
-    geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(T_mb);
-    tf.header.stamp = stamp;
-    tf.header.frame_id = cfg_.map_frame_id;
-    tf.child_frame_id = cfg_.base_frame_id;
-    tf_broadcaster_->sendTransform(tf);
-  }
+  // timerCallback と同じく、現在時刻まで予測する（最新の観測が現在時刻より先なら、その時刻）
+  const double t = std::max(now().seconds(), filter_.lagged->current().lastStamp());
+  const rclcpp::Time stamp = toTime(t);
+  if (stamp <= last_base_pose_stamp_) {return;}
+  last_base_pose_stamp_ = stamp;
 
-  // /ekf_pose：map → LiDAR（NDT と同じ基準）。共分散は LiDAR の姿勢の状態に対するヤコビアン J で J P J^T。
+  base_pose_pub_->publish(basePoseMsg(filter_.lagged->predicted(t), stamp));
+}
+
+geometry_msgs::msg::PoseWithCovarianceStamped EkfLocalizer::basePoseMsg(
+  const EkfCore & ekf, const rclcpp::Time & stamp) const
+{
+  geometry_msgs::msg::PoseWithCovarianceStamped pose;
+  pose.header.stamp = stamp;
+  pose.header.frame_id = cfg_.map_frame_id;
+  pose.pose.pose = tf2::toMsg(ekf.basePose());
+  Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(pose.pose.covariance.data()) =
+    ekf.covariance().topLeftCorner<6, 6>();
+  return pose;
+}
+
+geometry_msgs::msg::PoseWithCovarianceStamped EkfLocalizer::lidarPoseMsg(
+  const EkfCore & ekf, const rclcpp::Time & stamp) const
+{
+  // map → LiDAR（NDT と同じ基準）。共分散は LiDAR の姿勢の状態に対するヤコビアン J で J P J^T。
   // 取付オフセットのレバーアームで roll・pitch・yaw の不確かさが位置に漏れる分が入る
   geometry_msgs::msg::PoseWithCovarianceStamped pose;
   pose.header.stamp = stamp;
@@ -311,15 +370,29 @@ void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
   const Eigen::Matrix<double, 6, 6> J =
     filter_.ndt->lidarPoseJacobian(ekf.state()).leftCols<6>();
   Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(pose.pose.covariance.data()) =
-    J * P6 * J.transpose();
-  ekf_pose_pub_->publish(pose);
+    J * ekf.covariance().topLeftCorner<6, 6>() * J.transpose();
+  return pose;
+}
+
+void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
+{
+  if (cfg_.publish_tf) {
+    geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf.basePose());
+    tf.header.stamp = stamp;
+    tf.header.frame_id = cfg_.map_frame_id;
+    tf.child_frame_id = cfg_.base_frame_id;
+    tf_broadcaster_->sendTransform(tf);
+  }
+
+  // /ekf_pose：map → LiDAR
+  ekf_pose_pub_->publish(lidarPoseMsg(ekf, stamp));
 
   // /ekf_odom：map → base と、base 座標の v, omega
+  const geometry_msgs::msg::PoseWithCovarianceStamped base = basePoseMsg(ekf, stamp);
   nav_msgs::msg::Odometry odom;
-  odom.header = pose.header;
+  odom.header = base.header;
   odom.child_frame_id = cfg_.base_frame_id;
-  odom.pose.pose = tf2::toMsg(T_mb);
-  Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(odom.pose.covariance.data()) = P6;
+  odom.pose = base.pose;
   odom.twist.twist.linear.x = ekf.velocity();
   odom.twist.twist.angular.z = ekf.angularVelocity();
   const auto & P = ekf.covariance();

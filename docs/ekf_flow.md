@@ -326,6 +326,17 @@ flowchart TD
 - 予測は**コピーに対してだけ**行います。フィルタ本体は観測でしか進めないので、後で巻き戻して計算し直しても食い違いが出ません。
 - 一度配信した値は、巻き戻しで計算し直しても書き換わりません。
 
+### `publish_trigger` と別に出すもの
+
+| トピック | いつ | 出す値 |
+|---|---|---|
+| `tf_ndt_update` | NDT を入れるたび（`publish_ndt_update_tf`） | その NDT を入れた直後の状態（`LaggedEkf::stateAfter`、点群の時刻の事後推定値）の map → base。stamp は点群の取得時刻 |
+| `vlp16_pose` | 同上（`publish_vlp16_pose`） | 同じ状態の map → LiDAR と J P Jᵀ（`/ekf_pose` と同じ形）。stamp は点群の取得時刻 |
+| `vlp16_points` | 同上、`vlp16_pose` の直後（`publish_vlp16_points`） | 同じ stamp の点群。`cloudReceived` で stamp ごとに持っておき（`history_length` まで）、NDT を入れたらそれ以前のものと一緒に捨てる |
+| `base_pose` | `base_pose_rate` の周期の別のタイマー | `timer` と同じく、最新の状態を現在時刻まで予測した map → base と P（base の 6x6） |
+
+どれも `/tf`・`/ekf_pose` の出し方（NDT の初期値）や推定の計算は変えません。
+
 ## 5. `/initialpose` を受け取ったとき
 
 1. フィルタをリセットし、履歴を消す（直近のオドメトリだけは残し、次の初期化で使う）。

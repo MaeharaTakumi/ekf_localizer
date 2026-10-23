@@ -16,6 +16,12 @@
       publish_tf: true
       # NDT で更新した直後の値（点群の時刻の事後推定値）を TF map → base として tf_ndt_update に出す（RViz の点群の表示用）
       publish_ndt_update_tf: true
+      # MATLAB などが購読する出力：base_pose（この周期 [Hz] で、現在時刻まで予測した map → base。0 で出さない）、
+      #   vlp16_pose（NDT で更新した直後の map → LiDAR。stamp は点群の取得時刻）、
+      #   vlp16_points（vlp16_pose と同じ stamp の点群を出し直す。vlp16_pose と組にする）
+      base_pose_rate: 50.0
+      publish_vlp16_pose: true
+      publish_vlp16_points: true
 
       ndt_pose_topic: "ndt_pose"
       odom_topic: "odom"
