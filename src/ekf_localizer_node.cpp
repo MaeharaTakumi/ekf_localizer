@@ -54,11 +54,6 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
   ekf_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "ekf_pose", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   ekf_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("ekf_odom", rclcpp::QoS(10));
-  if (cfg_.publish_ndt_update_tf) {
-    // QoS は tf2_ros::TransformListener の /tf の購読（KeepLast(100)・reliable）に合わせる
-    ndt_update_tf_pub_ = create_publisher<tf2_msgs::msg::TFMessage>(
-      "tf_ndt_update", rclcpp::QoS(rclcpp::KeepLast(100)).reliable());
-  }
   if (cfg_.time_source == "receipt") {
     // NDT の観測の時刻にするため、点群を受信した時刻を使う。
     // best effort は reliable / best effort どちらの publisher とも接続できる
@@ -173,25 +168,7 @@ void EkfLocalizer::ndtPoseReceived(
 
   // 点群の取得時刻が stamp より ndt_delay だけ前のときに補う
   const double stamp = ndtTime(msg->header.stamp);
-  const MeasurementPtr m = filter_.ndt->measurement(z, stamp);
-  addMeasurement(m);
-  publishNdtUpdate(m, rclcpp::Time(msg->header.stamp, RCL_ROS_TIME));
-}
-
-void EkfLocalizer::publishNdtUpdate(const MeasurementPtr & m, const rclcpp::Time & stamp)
-{
-  if (!ndt_update_tf_pub_) {return;}
-  const std::optional<EkfCore> ekf = filter_.lagged->stateAfter(m);
-  if (!ekf || !ekf->initialized()) {return;}   // 古すぎて捨てた観測
-  // 状態は観測の時刻（ndtTime）のもの。stamp は RViz が点群を引く時刻（点群の stamp）にする
-  // （time_source: stamp・ndt_delay 0 なら同じ時刻）
-  geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf->basePose());
-  tf.header.stamp = stamp;
-  tf.header.frame_id = cfg_.map_frame_id;
-  tf.child_frame_id = cfg_.base_frame_id;
-  tf2_msgs::msg::TFMessage out;
-  out.transforms.push_back(tf);
-  ndt_update_tf_pub_->publish(out);
+  addMeasurement(filter_.ndt->measurement(z, stamp));
 }
 
 void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr msg)

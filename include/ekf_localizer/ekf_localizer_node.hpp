@@ -11,7 +11,6 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_broadcaster.h"
 #include "tf2_ros/transform_listener.h"
-#include "tf2_msgs/msg/tf_message.hpp"
 
 #include "ekf_localizer/ekf_params.hpp"
 
@@ -25,7 +24,6 @@ namespace ekf_localizer
 ///   出力  predict_rate の周期で、最新の状態を現在時刻まで予測した TF map → base、ekf_pose（map → LiDAR）、
 ///         ekf_odom（map → base、v, omega）。NDT は点群の stamp の時刻の TF を初期値にし、MATLAB などは
 ///         最新の TF（今の姿勢）と点群の stamp の時刻の TF（点群の座標変換）を引く
-///         tf_ndt_update（publish_ndt_update_tf。NDT で更新した直後の map → base を点群の stamp で。RViz 用）
 ///
 ///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻は time_source で選ぶ。
 ///     stamp    メッセージの stamp。NDT は遅れて届くので、点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す
@@ -51,8 +49,6 @@ private:
   double ndtTime(const builtin_interfaces::msg::Time & stamp);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
-  /// NDT の観測 m で更新した直後の状態の map → base を、stamp（点群の時刻）の TF として tf_ndt_update に配信する
-  void publishNdtUpdate(const MeasurementPtr & m, const rclcpp::Time & stamp);
   /// ekf の推定値を stamp の時刻として配信する
   void publish(const EkfCore & ekf, const rclcpp::Time & stamp);
   /// map → base の姿勢と共分散（base の 6x6）
@@ -82,7 +78,6 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr ekf_pose_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ekf_odom_pub_;
-  rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr ndt_update_tf_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 
