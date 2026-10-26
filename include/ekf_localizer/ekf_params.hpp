@@ -25,15 +25,12 @@ struct EkfConfig
   std::string ndt_pose_topic{"ndt_pose"};
   std::string odom_topic{"odom"};
   std::string initialpose_topic{"initialpose"};
-  /// 配信のきっかけ："timer"（predict_rate の周期で現在時刻の予測）、"cloud"（点群の stamp の時刻の予測）、
-  /// "update"（NDT・オドメトリで更新するたびに、その時刻の事後推定値）
-  std::string publish_trigger{"timer"};
   /// 観測の時刻："stamp"（メッセージの stamp。遅れて届いた観測は巻き戻して入れ直す）or
   /// "receipt"（このノードが受信した時刻。届いた順に処理され、巻き戻しは起きない）
   std::string time_source{"stamp"};
-  /// publish_trigger: "cloud" で購読する点群（stamp だけ使う）
+  /// time_source: "receipt" で購読する点群（NDT の観測の時刻に、その点群を受信した時刻を使う）
   std::string points_topic{"velodyne_points"};
-  /// 予測して配信する周期 [Hz]（publish_trigger: "timer"）
+  /// 最新の状態を現在時刻まで予測して TF・ekf_pose・ekf_odom を配信する周期 [Hz]
   double predict_rate{50.0};
   /// 巻き戻しに備えて観測と状態を保持する長さ [s]（NDT の遅れより長くする）
   double history_length{1.0};
@@ -41,15 +38,8 @@ struct EkfConfig
   bool publish_tf{true};
   /// NDT で更新した直後の状態（点群の時刻の事後推定値）を、map → base_frame_id の TF として
   /// tf_ndt_update（tf2_msgs/TFMessage）に配信するか。RViz の /tf をこれに付け替えると、点群を同じ時刻の
-  /// EKF の NDT の更新値で表示できる（/tf は配信のきっかけの値で、NDT の初期値にも使うので変えない）
+  /// EKF の NDT の更新値で表示できる（/tf は predict_rate の周期の予測値で、NDT の初期値にも使うので変えない）
   bool publish_ndt_update_tf{false};
-  /// 現在時刻まで予測した map → base_frame_id を base_pose に配信する周期 [Hz]。0 なら配信しない。
-  /// publish_trigger と別のタイマー（TF・ekf_pose の出し方は変えない）
-  double base_pose_rate{0.0};
-  /// NDT で更新した直後の状態（点群の時刻の事後推定値）を、map → LiDAR として vlp16_pose に配信するか
-  bool publish_vlp16_pose{false};
-  /// NDT で更新したときに、同じ stamp の点群（points_topic）を vlp16_points に出し直すか（vlp16_pose と組にする）
-  bool publish_vlp16_points{false};
   std::string map_frame_id{"map"};
   std::string base_frame_id{"base_link"};
   /// NDT が推定する LiDAR のフレーム（取付 base → LiDAR は TF から読む）

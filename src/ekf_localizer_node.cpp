@@ -27,8 +27,7 @@ using Status = LaggedEkf::Status;
 
 EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
 : rclcpp::Node("ekf_localizer", options),
-  last_publish_stamp_(0, 0, RCL_ROS_TIME),
-  last_base_pose_stamp_(0, 0, RCL_ROS_TIME)
+  last_publish_stamp_(0, 0, RCL_ROS_TIME)
 {
   declareEkfParameters(*this);
   cfg_ = loadEkfConfig(*this);
@@ -60,36 +59,13 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
     ndt_update_tf_pub_ = create_publisher<tf2_msgs::msg::TFMessage>(
       "tf_ndt_update", rclcpp::QoS(rclcpp::KeepLast(100)).reliable());
   }
-  // base_pose・vlp16_pose・vlp16_points は MATLAB などが購読する。reliable は reliable / best effort どちらの
-  // 購読とも接続できる
-  if (cfg_.base_pose_rate > 0.0) {
-    base_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
-      "base_pose", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
-  }
-  if (cfg_.publish_vlp16_pose) {
-    vlp16_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
-      "vlp16_pose", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
-  }
-  if (cfg_.publish_vlp16_points) {
-    vlp16_points_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-      "vlp16_points", rclcpp::QoS(rclcpp::KeepLast(2)).reliable());
-  }
-
-  if (cfg_.publish_trigger == "cloud" || cfg_.time_source == "receipt" || cfg_.publish_vlp16_points) {
-    // 点群は stamp（と receipt では受信した時刻）を使い、publish_vlp16_points では出し直すために持っておく。
+  if (cfg_.time_source == "receipt") {
+    // NDT の観測の時刻にするため、点群を受信した時刻を使う。
     // best effort は reliable / best effort どちらの publisher とも接続できる
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       cfg_.points_topic, rclcpp::SensorDataQoS(),
       std::bind(&EkfLocalizer::cloudReceived, this, std::placeholders::_1));
   }
-  if (cfg_.base_pose_rate > 0.0) {
-    // publish_trigger のタイマーとは別（ROS 時刻。use_sim_time ならシミュレーション時刻で回る）
-    const auto base_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::duration<double>(1.0 / cfg_.base_pose_rate));
-    base_pose_timer_ = rclcpp::create_timer(
-      this, get_clock(), base_period, std::bind(&EkfLocalizer::basePoseTimerCallback, this));
-  }
-  if (cfg_.publish_trigger != "timer") {return;}   // cloud・update はタイマーなし
 
   // ROS 時刻のタイマー（use_sim_time ならシミュレーション時刻で回る）
   const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -121,12 +97,6 @@ bool EkfLocalizer::tryCreateFilter()
   return true;
 }
 
-bool EkfLocalizer::filterReady()
-{
-  if (filter_.lagged) {return true;}
-  return cfg_.publish_trigger == "update" && tryCreateFilter();
-}
-
 double EkfLocalizer::measurementTime(const builtin_interfaces::msg::Time & stamp, double delay)
 {
   const double t = (cfg_.time_source == "receipt") ?
@@ -148,17 +118,6 @@ double EkfLocalizer::ndtTime(const builtin_interfaces::msg::Time & stamp)
     "No point cloud on %s with the NDT stamp was received. Using the NDT receipt time.",
     cfg_.points_topic.c_str());
   return now().seconds() - cfg_.ndt_delay;
-}
-
-void EkfLocalizer::publishUpdated()
-{
-  if (cfg_.publish_trigger != "update" || !filter_.lagged || !filter_.lagged->initialized()) {return;}
-  // 最新の状態は、最後に適用した観測の時刻の事後推定値（予測はその時刻まで）
-  const EkfCore & ekf = filter_.lagged->current();
-  const rclcpp::Time stamp = toTime(ekf.lastStamp());
-  if (stamp <= last_publish_stamp_) {return;}   // 遅れて届いた観測を巻き戻して入れたときは、最新の時刻が進まない
-  last_publish_stamp_ = stamp;
-  publish(ekf, stamp);
 }
 
 void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
@@ -201,7 +160,7 @@ void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
 void EkfLocalizer::ndtPoseReceived(
   const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg)
 {
-  if (!filterReady()) {return;}
+  if (!filter_.lagged) {return;}   // EKF はタイマーで作る（取付が TF から読めてから）
 
   // NDT の解は map → LiDAR の姿勢。共分散は使わない（観測ノイズは R_ndt）
   const auto & p = msg->pose.pose;
@@ -217,40 +176,27 @@ void EkfLocalizer::ndtPoseReceived(
   const MeasurementPtr m = filter_.ndt->measurement(z, stamp);
   addMeasurement(m);
   publishNdtUpdate(m, rclcpp::Time(msg->header.stamp, RCL_ROS_TIME));
-  publishUpdated();
 }
 
 void EkfLocalizer::publishNdtUpdate(const MeasurementPtr & m, const rclcpp::Time & stamp)
 {
-  // この点群を取り出し、それ以前の点群（NDT が解かなかったもの。NDT の解は stamp の順に届く）は捨てる
-  sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud;
-  if (vlp16_points_pub_) {
-    const auto it = held_clouds_.find(stamp.nanoseconds());
-    if (it != held_clouds_.end()) {cloud = it->second;}
-    held_clouds_.erase(held_clouds_.begin(), held_clouds_.upper_bound(stamp.nanoseconds()));
-  }
-  if (!ndt_update_tf_pub_ && !vlp16_pose_pub_ && !vlp16_points_pub_) {return;}
+  if (!ndt_update_tf_pub_) {return;}
   const std::optional<EkfCore> ekf = filter_.lagged->stateAfter(m);
   if (!ekf || !ekf->initialized()) {return;}   // 古すぎて捨てた観測
   // 状態は観測の時刻（ndtTime）のもの。stamp は RViz が点群を引く時刻（点群の stamp）にする
   // （time_source: stamp・ndt_delay 0 なら同じ時刻）
-  if (ndt_update_tf_pub_) {
-    geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf->basePose());
-    tf.header.stamp = stamp;
-    tf.header.frame_id = cfg_.map_frame_id;
-    tf.child_frame_id = cfg_.base_frame_id;
-    tf2_msgs::msg::TFMessage out;
-    out.transforms.push_back(tf);
-    ndt_update_tf_pub_->publish(out);
-  }
-  // 姿勢を先に出し、続けて同じ stamp の点群を出す（購読側は 2 つの stamp が同じなら組にする）
-  if (vlp16_pose_pub_) {vlp16_pose_pub_->publish(lidarPoseMsg(*ekf, stamp));}
-  if (cloud) {vlp16_points_pub_->publish(*cloud);}
+  geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf->basePose());
+  tf.header.stamp = stamp;
+  tf.header.frame_id = cfg_.map_frame_id;
+  tf.child_frame_id = cfg_.base_frame_id;
+  tf2_msgs::msg::TFMessage out;
+  out.transforms.push_back(tf);
+  ndt_update_tf_pub_->publish(out);
 }
 
 void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr msg)
 {
-  if (!filterReady() || !filter_.odom) {return;}
+  if (!filter_.lagged || !filter_.odom) {return;}
 
   Eigen::Vector2d r = cfg_.odom.r;
   if (cfg_.odom_covariance_source == "message") {
@@ -271,7 +217,6 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
   // twist が表す動きは stamp より odom_delay だけ前のもの（diff_drive_controller の移動平均など）
   const double stamp = measurementTime(msg->header.stamp, cfg_.odom_delay);
   addMeasurement(filter_.odom->measurement(v, omega, r, stamp));
-  publishUpdated();
 }
 
 void EkfLocalizer::initialPoseReceived(
@@ -286,35 +231,12 @@ void EkfLocalizer::initialPoseReceived(
 
 void EkfLocalizer::cloudReceived(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
 {
-  if (cfg_.time_source == "receipt") {
-    // NDT の観測の時刻にするため、点群を受信した時刻を stamp ごとに覚える
-    const double t_recv = now().seconds();
-    cloud_receipt_[rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).nanoseconds()] = t_recv;
-    while (!cloud_receipt_.empty() && t_recv - cloud_receipt_.begin()->second > cfg_.history_length) {
-      cloud_receipt_.erase(cloud_receipt_.begin());
-    }
+  // time_source: receipt で、NDT の観測の時刻にするため、点群を受信した時刻を stamp ごとに覚える
+  const double t_recv = now().seconds();
+  cloud_receipt_[rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).nanoseconds()] = t_recv;
+  while (!cloud_receipt_.empty() && t_recv - cloud_receipt_.begin()->second > cfg_.history_length) {
+    cloud_receipt_.erase(cloud_receipt_.begin());
   }
-  if (vlp16_points_pub_) {
-    // NDT で更新したら vlp16_points に出し直すので、stamp ごとに持っておく（NDT の解が来なかったものは
-    // history_length で捨てる。時刻が history_length より戻ったら（録画の再生のやり直しなど）全部捨てる）
-    const int64_t key = rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).nanoseconds();
-    const auto history = static_cast<int64_t>(cfg_.history_length * 1e9);
-    if (!held_clouds_.empty() && held_clouds_.rbegin()->first - key > history) {held_clouds_.clear();}
-    held_clouds_[key] = msg;
-    while (key - held_clouds_.begin()->first > history) {held_clouds_.erase(held_clouds_.begin());}
-  }
-  if (cfg_.publish_trigger != "cloud") {return;}
-
-  if (!filter_.lagged && !tryCreateFilter()) {return;}
-  if (!filter_.lagged->initialized()) {return;}
-
-  // 点群の取得時刻（stamp）の予測を出す。この点群の NDT はまだ届いていないので、
-  // stamp 以前の観測（前の NDT とオドメトリ）からの予測になる。NDT の初期値にもこの TF が使われる
-  const rclcpp::Time stamp(msg->header.stamp, RCL_ROS_TIME);
-  if (stamp <= last_publish_stamp_) {return;}
-  last_publish_stamp_ = stamp;
-
-  publish(filter_.lagged->at(stamp.seconds()), stamp);
 }
 
 void EkfLocalizer::timerCallback()
@@ -330,20 +252,6 @@ void EkfLocalizer::timerCallback()
   last_publish_stamp_ = stamp;
 
   publish(filter_.lagged->predicted(t), stamp);
-}
-
-void EkfLocalizer::basePoseTimerCallback()
-{
-  // EKF は配信のきっかけ（publish_trigger）や観測の側で作る
-  if (!filter_.lagged || !filter_.lagged->initialized()) {return;}
-
-  // timerCallback と同じく、現在時刻まで予測する（最新の観測が現在時刻より先なら、その時刻）
-  const double t = std::max(now().seconds(), filter_.lagged->current().lastStamp());
-  const rclcpp::Time stamp = toTime(t);
-  if (stamp <= last_base_pose_stamp_) {return;}
-  last_base_pose_stamp_ = stamp;
-
-  base_pose_pub_->publish(basePoseMsg(filter_.lagged->predicted(t), stamp));
 }
 
 geometry_msgs::msg::PoseWithCovarianceStamped EkfLocalizer::basePoseMsg(

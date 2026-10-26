@@ -290,18 +290,18 @@ sequenceDiagram
   オドメトリで出るときは、オドメトリの通信の遅れか、NDT とオドメトリの時計のずれを疑ってください。
 - 遅れて届いた観測を入れ直した結果が、時刻順に処理した結果と一致することは、単体テスト `test/test_lagged_ekf.cpp` で確認しています。
 
-## 4. 配信（`publish_trigger`）
+## 4. 配信
 
-| `publish_trigger` | いつ | 出す値 |
-|---|---|---|
-| `timer`（既定） | `predict_rate` の周期（下の図） | 最新の状態を現在時刻まで予測した値 |
-| `cloud` | 点群が届くたび | 点群の stamp の時刻の予測値（その点群の NDT はまだ入っていない。NDT の初期値にも使われる） |
-| `update` | NDT・オドメトリで更新するたび | 最新の状態（最後に適用した観測の時刻の事後推定値）。遅れて届いた NDT を巻き戻して入れたときは最新の時刻が進まないので出さない |
+`predict_rate`（50 Hz）の周期で、最新の状態を現在時刻まで予測した値を配信します（下の図）。
+NDT の初期値と MATLAB の点群の座標変換は、この `/tf` を点群の stamp の時刻で引きます（tf2 が前後の 2 つを補間する）。
+引いた値は、その点群の NDT を入れる前の予測値（事前推定値）です。MATLAB は最新の `/tf` を今の姿勢（後輪間中心）にも使います。
+（2026-10-26 まであった `publish_trigger` の `cloud`（点群が届くたびに、その stamp の時刻の予測値）・`update`（更新するたびに、
+その時刻の事後推定値）と、MATLAB 用の `base_pose`・`vlp16_pose`・`vlp16_points` はやめた。）
 
 観測の時刻は `time_source` で選びます（`stamp`：メッセージの stamp、`receipt`：受信した時刻。オドメトリはこのノードが受信した時刻、
 NDT はその点群を受信した時刻（NDT のノードに入っていたころと同じ。点群を受け取って stamp ごとに覚えておく））。
 
-`timer` の流れ：
+流れ：
 
 ```mermaid
 flowchart TD
@@ -326,16 +326,13 @@ flowchart TD
 - 予測は**コピーに対してだけ**行います。フィルタ本体は観測でしか進めないので、後で巻き戻して計算し直しても食い違いが出ません。
 - 一度配信した値は、巻き戻しで計算し直しても書き換わりません。
 
-### `publish_trigger` と別に出すもの
+### 周期とは別に出すもの
 
 | トピック | いつ | 出す値 |
 |---|---|---|
-| `tf_ndt_update` | NDT を入れるたび（`publish_ndt_update_tf`） | その NDT を入れた直後の状態（`LaggedEkf::stateAfter`、点群の時刻の事後推定値）の map → base。stamp は点群の取得時刻 |
-| `vlp16_pose` | 同上（`publish_vlp16_pose`） | 同じ状態の map → LiDAR と J P Jᵀ（`/ekf_pose` と同じ形）。stamp は点群の取得時刻 |
-| `vlp16_points` | 同上、`vlp16_pose` の直後（`publish_vlp16_points`） | 同じ stamp の点群。`cloudReceived` で stamp ごとに持っておき（`history_length` まで）、NDT を入れたらそれ以前のものと一緒に捨てる |
-| `base_pose` | `base_pose_rate` の周期の別のタイマー | `timer` と同じく、最新の状態を現在時刻まで予測した map → base と P（base の 6x6） |
+| `tf_ndt_update` | NDT を入れるたび（`publish_ndt_update_tf`） | その NDT を入れた直後の状態（`LaggedEkf::stateAfter`、点群の時刻の事後推定値）の map → base。stamp は点群の取得時刻。RViz の点群の表示用 |
 
-どれも `/tf`・`/ekf_pose` の出し方（NDT の初期値）や推定の計算は変えません。
+`/tf`・`/ekf_pose` の出し方（NDT の初期値）や推定の計算は変えません。
 
 ## 5. `/initialpose` を受け取ったとき
 
