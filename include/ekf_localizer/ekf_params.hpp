@@ -34,8 +34,6 @@ struct EkfConfig
   double predict_rate{50.0};
   /// 巻き戻しに備えて観測と状態を保持する長さ [s]（NDT の遅れより長くする）
   double history_length{1.0};
-  /// map → base_frame_id の TF を配信するか
-  bool publish_tf{true};
   std::string map_frame_id{"map"};
   std::string base_frame_id{"base_link"};
   /// NDT が推定する LiDAR のフレーム（取付 base → LiDAR は TF から読む）

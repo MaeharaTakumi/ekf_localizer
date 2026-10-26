@@ -316,7 +316,7 @@ flowchart TD
 
 | トピック | 中身 |
 |---|---|
-| `/tf` | map → base の TF。値は T_B。`publish_tf: true` のときだけ配信する |
+| `/tf` | map → base の TF。値は T_B。常に配信する |
 | `/ekf_pose` | map → LiDAR の姿勢 T_B · T_BL と、その共分散 J P Jᵀ。NDT の解と同じ形なので、そのまま比べられる |
 | `/ekf_odom` | map → base の姿勢 T_B とその共分散 P、base の前進速度 v・ヨー角速度 omega とその共分散 |
 

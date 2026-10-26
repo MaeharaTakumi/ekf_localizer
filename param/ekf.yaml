@@ -12,7 +12,6 @@
       predict_rate: 50.0
       history_length: 1.0
       max_predict_dt: 0.2
-      publish_tf: true
 
       ndt_pose_topic: "ndt_pose"
       odom_topic: "odom"

@@ -261,13 +261,11 @@ geometry_msgs::msg::PoseWithCovarianceStamped EkfLocalizer::lidarPoseMsg(
 
 void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
 {
-  if (cfg_.publish_tf) {
-    geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf.basePose());
-    tf.header.stamp = stamp;
-    tf.header.frame_id = cfg_.map_frame_id;
-    tf.child_frame_id = cfg_.base_frame_id;
-    tf_broadcaster_->sendTransform(tf);
-  }
+  geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf.basePose());
+  tf.header.stamp = stamp;
+  tf.header.frame_id = cfg_.map_frame_id;
+  tf.child_frame_id = cfg_.base_frame_id;
+  tf_broadcaster_->sendTransform(tf);
 
   // /ekf_pose：map → LiDAR
   ekf_pose_pub_->publish(lidarPoseMsg(ekf, stamp));

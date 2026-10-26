@@ -20,7 +20,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | 入力 | `initialpose`（`initialpose_topic`） | geometry_msgs/PoseWithCovarianceStamped | 受け取ると EKF をリセットし、次の NDT で初期化し直す |
 | 出力 | `ekf_pose` | geometry_msgs/PoseWithCovarianceStamped | map → LiDAR（共分散は観測モデルで伝播） |
 | 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v, omega |
-| 出力 | TF | | `map_frame_id` → `base_frame_id`（`publish_tf`）。`predict_rate` の周期で、最新の状態を現在時刻まで予測した値。NDT の初期値と MATLAB はこの TF を点群の stamp の時刻で引く（tf2 が前後の値を補間する）。MATLAB は最新の値を今の姿勢にも使う |
+| 出力 | TF | | `map_frame_id` → `base_frame_id`（常に配信）。`predict_rate` の周期で、最新の状態を現在時刻まで予測した値。NDT の初期値と MATLAB はこの TF を点群の stamp の時刻で引く（tf2 が前後の値を補間する）。MATLAB は最新の値を今の姿勢にも使う |
 | 入力 | `velodyne_points`（`points_topic`） | sensor_msgs/PointCloud2 | `time_source: receipt` のときだけ購読し、受信した時刻を NDT の観測の時刻にする |
 
 購読するトピック名はパラメータで変えられます（リマップでも変えられます）。
@@ -38,7 +38,6 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | `predict_rate` | 50.0 | 最新の状態を現在時刻まで予測して TF・`ekf_pose`・`ekf_odom` を配信する周期 [Hz]。オドメトリと同じ 50 Hz にしている（点群は stamp から約 15 ms 後に届くので、NDT・MATLAB が点群の stamp より後の TF を待つのは最大 5 ms ほど。Gazebo の `/clock` は 10 ms 刻みなので 100 Hz より速くしても出る数は増えない） |
 | `history_length` | 1.0 | 巻き戻しのために観測を保持する長さ [s]。NDT の遅れ（計算時間＋通信）より長くする |
 | `max_predict_dt` | 0.2 | 1 回の予測で進める時間の上限 [s]。下記 |
-| `publish_tf` | true | `map_frame_id` → `base_frame_id` の TF を配信するか |
 
 TF は、届いた観測をすべて入れた最新の状態を現在時刻まで予測した値です。一度出した値は書き直しません。
 点群の時刻の NDT は約 50 ms 遅れて届き、その時刻まで巻き戻して入れるので、NDT が届いた直後の TF は
