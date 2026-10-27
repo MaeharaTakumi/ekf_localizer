@@ -295,6 +295,7 @@ sequenceDiagram
 `predict_rate`（50 Hz）の周期で、最新の状態を現在時刻まで予測した値を配信します（下の図）。
 NDT の初期値と MATLAB の点群の座標変換は、この `/tf` を点群の stamp の時刻で引きます（tf2 が前後の 2 つを補間する）。
 引いた値は、その点群の NDT を入れる前の予測値（事前推定値）です。MATLAB は最新の `/tf` を今の姿勢（後輪間中心）にも使います。
+`tf_future_steps` が 1 以上なら、`/tf` だけは周期の刻みの stamp で、今より先の刻みも送ります（下の「刻みの TF」）。
 （2026-10-26 まであった `publish_trigger` の `cloud`（点群が届くたびに、その stamp の時刻の予測値）・`update`（更新するたびに、
 その時刻の事後推定値）と、MATLAB 用の `base_pose`・`vlp16_pose`・`vlp16_points`、NDT で更新した直後の値を出す `tf_ndt_update` はやめた。）
 
@@ -311,7 +312,10 @@ flowchart TD
   C --> D{"t_pub が前回の配信より新しい？"}
   D -->|いいえ| X
   D -->|はい| E["最新の状態をコピーして t_pub まで予測"]
-  E --> F["トピックを配信<br/>/tf<br/>/ekf_pose<br/>/ekf_odom"]
+  E --> G{"tf_future_steps ≥ 1？"}
+  G -->|いいえ| F["トピックを配信<br/>/tf（t_pub）<br/>/ekf_pose<br/>/ekf_odom"]
+  G -->|はい| H["刻みごとに at(k·T) で /tf をまとめて送る"]
+  H --> F2["/ekf_pose<br/>/ekf_odom（t_pub）"]
 ```
 
 | トピック | 中身 |
@@ -324,7 +328,22 @@ flowchart TD
 - 3 つは上から順に配信します（並列ではありません）。どれも同じ状態のコピーから作り、stamp はすべて t_pub です。
 - t_x が t_now より先になることがあります（sim time の `/clock` が粗い場合）。そのときは t_pub = t_x で出します。
 - 予測は**コピーに対してだけ**行います。フィルタ本体は観測でしか進めないので、後で巻き戻して計算し直しても食い違いが出ません。
-- 一度配信した値は、巻き戻しで計算し直しても書き換わりません。
+- 一度配信した値は、巻き戻しで計算し直しても書き換わりません（`tf_future_steps` が 0 のとき）。
+
+### 刻みの TF（`tf_future_steps` ≥ 1）
+
+点群の stamp より後の TF が届くまで、NDT は待ち、MATLAB は前の組で代えます。これをなくすため、`/tf` の stamp を
+周期 T = 1 / `predict_rate` の刻み k·T（整数のナノ秒）にそろえ、今より先の刻みも送ります。
+
+- 毎周期、今以前の最後の刻み k0 = floor(t_pub / T) について、k0 − `tf_past_steps` + 1 〜 k0 + `tf_future_steps` の刻みを送る
+  （`tf_future_steps: 2`・`tf_past_steps: 1` なら k0・k0+1・k0+2 の 3 個）。1 つの `/tf` メッセージにまとめる。
+- 値は `LaggedEkf::at(k·T)`：その刻み以前の最後の観測を入れた直後の状態を、その刻みまで予測したコピー。未来の刻みは最新の状態の予測、
+  過ぎた刻みは遅れて届いたオドメトリ（`tf_past_steps` が 2 以上なら NDT も）を入れた値です。フィルタ本体は変えません。
+- 同じ刻みは周期ごとに新しい値で送り直します。tf2（NDT・RViz）と MATLAB の `ros2tf` は、同じ stamp の TF を後から届いた値で
+  置き換え、前の stamp の TF も後から差し込みます（2026-10-27 に確かめた）。stamp を整数で作るので、周期が揺れても同じ刻みは同じ stamp です。
+- 初期化より前の刻みと、履歴の起点より前の刻み（`at` が起点の時刻のまま進まない）は送りません。
+- `/ekf_pose`・`/ekf_odom` は今まで通り t_pub の 1 個です。
+- 最新を引く側（MATLAB の今の姿勢、RViz の視点）には、最も先の刻みの値（(`tf_future_steps` − 1)·T 〜 `tf_future_steps`·T 先の予測）が渡ります。
 
 
 ## 5. `/initialpose` を受け取ったとき

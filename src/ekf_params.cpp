@@ -16,6 +16,8 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("time_source", "stamp");
   node.declare_parameter("points_topic", "velodyne_points");
   node.declare_parameter("predict_rate", 50.0);
+  node.declare_parameter("tf_future_steps", 0);
+  node.declare_parameter("tf_past_steps", 0);
   node.declare_parameter("history_length", 1.0);
   node.declare_parameter("map_frame_id", "map");
   node.declare_parameter("base_frame_id", "base_link");
@@ -83,6 +85,34 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
     RCLCPP_WARN(logger, "history_length must be positive (got %lf). Using 1.0.", cfg.history_length);
     cfg.history_length = 1.0;
   }
+  node.get_parameter("tf_future_steps", cfg.tf_future_steps);
+  node.get_parameter("tf_past_steps", cfg.tf_past_steps);
+  if (cfg.tf_future_steps < 0) {
+    RCLCPP_WARN(logger, "tf_future_steps must be >= 0 (got %d). Using 0.", cfg.tf_future_steps);
+    cfg.tf_future_steps = 0;
+  }
+  if (cfg.tf_past_steps < 0) {
+    RCLCPP_WARN(logger, "tf_past_steps must be >= 0 (got %d). Using 0.", cfg.tf_past_steps);
+    cfg.tf_past_steps = 0;
+  }
+  if (cfg.tf_future_steps == 0 && cfg.tf_past_steps > 0) {
+    RCLCPP_WARN(logger, "tf_past_steps is used only when tf_future_steps >= 1. Ignoring it.");
+    cfg.tf_past_steps = 0;
+  }
+  // 送り直す刻みは履歴の中に収める（起点より古い刻みの状態は求められない）
+  const int max_past = std::max(0, static_cast<int>(std::ceil(cfg.history_length * cfg.predict_rate)) - 1);
+  if (cfg.tf_past_steps > max_past) {
+    RCLCPP_WARN(
+      logger, "tf_past_steps must be shorter than history_length (got %d). Using %d.",
+      cfg.tf_past_steps, max_past);
+    cfg.tf_past_steps = max_past;
+  }
+  // 1 つの /tf のメッセージを LAN の 1 フレーム（1500 B、TF 1 個は約 100 B）に収める目安
+  if (cfg.tf_future_steps + cfg.tf_past_steps > 10) {
+    RCLCPP_WARN(
+      logger, "tf_future_steps + tf_past_steps = %d transforms per message. "
+      "More than 10 may not fit in one Ethernet frame.", cfg.tf_future_steps + cfg.tf_past_steps);
+  }
   node.get_parameter("map_frame_id", cfg.map_frame_id);
   node.get_parameter("base_frame_id", cfg.base_frame_id);
   node.get_parameter("lidar_frame_id", cfg.lidar_frame_id);
@@ -142,6 +172,11 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
   RCLCPP_INFO(
     logger, "ekf publish: %lf Hz (predicted to the current time), history_length: %lf s",
     cfg.predict_rate, cfg.history_length);
+  if (cfg.tf_future_steps > 0) {
+    RCLCPP_INFO(
+      logger, "ekf TF on the %lf s grid: %d future step(s), %d past step(s) resent",
+      1.0 / cfg.predict_rate, cfg.tf_future_steps, cfg.tf_past_steps);
+  }
   RCLCPP_INFO(
     logger, "ekf gate_ndt: %lf (NDT observed as the base pose, 6 components at once)", nprm.gate);
   RCLCPP_INFO(

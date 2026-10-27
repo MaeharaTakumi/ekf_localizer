@@ -10,6 +10,9 @@
       # TF map → base・ekf_pose・ekf_odom を、最新の状態を現在時刻まで予測して出す周期 [Hz]。NDT の初期値と MATLAB は
       # この TF を点群の stamp で引く（補間）。オドメトリと同じ 50 Hz（点群は stamp から約 15 ms で届くので、待っても 5 ms ほど）
       predict_rate: 50.0
+      # TF を周期の刻みの stamp で送るとき、今より後の刻みの数と、今以前の刻みを送り直す数（0 なら今の時刻の 1 個だけ。README）
+      tf_future_steps: 0
+      tf_past_steps: 0
       history_length: 1.0
       max_predict_dt: 0.2
 

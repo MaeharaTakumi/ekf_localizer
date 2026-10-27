@@ -319,6 +319,44 @@ TEST(LaggedEkf, AtUsesOnlyMeasurementsUpToT)
   EXPECT_GT(lagged.current().lastStamp(), kT0 + 0.905);
 }
 
+TEST(LaggedEkf, AtBeforeInitializationOrAnchorIsDetectable)
+{
+  // ekf_localizer は過ぎた刻みの TF を at(t) で送り直す。初期化より前の t は初期化前の状態、
+  // 履歴の起点より前の t は起点の時刻のまま（lastStamp() > t）になるので、ノードはそれを見て送らない
+  std::vector<Meas> ms = scenario(0.0, 2.0);
+  // 最初の NDT より前のオドメトリは、初期化前に履歴に入る
+  ms.erase(
+    std::remove_if(ms.begin(), ms.end(), [](const Meas & m) {return m.ndt && m.stamp < kT0 + 0.3;}),
+    ms.end());
+  const Filter f = makeFilter();
+  LaggedEkf lagged(f.core, 0.5);
+  runLagged(lagged, f, ms);
+  ASSERT_TRUE(lagged.initialized());
+
+  const double latest = lagged.latestStamp();
+  // 起点より前：起点の時刻のまま
+  const EkfCore old = lagged.at(latest - 0.8);
+  EXPECT_TRUE(old.initialized());
+  EXPECT_GT(old.lastStamp(), latest - 0.8);
+  // 履歴の中：t まで予測した値
+  const EkfCore in = lagged.at(latest - 0.2);
+  EXPECT_DOUBLE_EQ(in.lastStamp(), latest - 0.2);
+
+  // 初期化し直したあと、初期化（latest + 約 0.3 の NDT）より前の t は初期化前の状態。
+  // 初期化前のオドメトリが起点に畳み込まれないよう、history_length（0.5 s）の中で止める
+  lagged.reset();
+  std::vector<Meas> after;
+  for (const Meas & m : scenario(0.0, 3.0)) {
+    if (m.stamp > latest && m.stamp < latest + 0.45 && !(m.ndt && m.stamp < latest + 0.25)) {
+      after.push_back(m);
+    }
+  }
+  runLagged(lagged, f, after);
+  ASSERT_TRUE(lagged.initialized());
+  EXPECT_FALSE(lagged.at(latest + 0.1).initialized());
+  EXPECT_TRUE(lagged.at(latest + 0.4).initialized());
+}
+
 TEST(LaggedEkf, StateAfterIsPosteriorOfThatNdt)
 {
   // 遅れて届いた NDT を入れた直後の stateAfter(m) は、m 以前の観測だけで求めた状態に m を適用したもの

@@ -31,6 +31,7 @@ add_library(ekf_core STATIC
   src/ndt_model.cpp
   src/odom_model.cpp
   src/lagged_ekf.cpp
+  src/tf_grid.cpp
 )
 target_include_directories(ekf_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -69,6 +70,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_ekf_models ekf_core)
   ament_add_gtest(test_lagged_ekf test/test_lagged_ekf.cpp)
   target_link_libraries(test_lagged_ekf ekf_core)
+  ament_add_gtest(test_tf_grid test/test_tf_grid.cpp)
+  target_link_libraries(test_tf_grid ekf_core)
 endif()
 
 ament_package()

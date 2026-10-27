@@ -32,6 +32,11 @@ struct EkfConfig
   std::string points_topic{"velodyne_points"};
   /// 最新の状態を現在時刻まで予測して TF・ekf_pose・ekf_odom を配信する周期 [Hz]
   double predict_rate{50.0};
+  /// TF を predict_rate の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。
+  /// 0 なら今の時刻の 1 個だけ（刻みにしない）
+  int tf_future_steps{0};
+  /// tf_future_steps が 1 以上のとき、今以前の刻みを何個送り直すか（0 なら送らない）
+  int tf_past_steps{0};
   /// 巻き戻しに備えて観測と状態を保持する長さ [s]（NDT の遅れより長くする）
   double history_length{1.0};
   std::string map_frame_id{"map"};

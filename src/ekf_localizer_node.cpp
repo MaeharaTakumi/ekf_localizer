@@ -4,11 +4,14 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <vector>
 
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_eigen/tf2_eigen.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+
+#include "ekf_localizer/tf_grid.hpp"
 
 namespace ekf_localizer
 {
@@ -62,11 +65,11 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
       std::bind(&EkfLocalizer::cloudReceived, this, std::placeholders::_1));
   }
 
-  // ROS 時刻のタイマー（use_sim_time ならシミュレーション時刻で回る）
-  const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-    std::chrono::duration<double>(1.0 / cfg_.predict_rate));
+  // ROS 時刻のタイマー（use_sim_time ならシミュレーション時刻で回る）。周期は TF の刻みと同じ整数のナノ秒
+  period_ns_ = std::max<int64_t>(1, std::llround(1e9 / cfg_.predict_rate));
   timer_ = rclcpp::create_timer(
-    this, get_clock(), period, std::bind(&EkfLocalizer::timerCallback, this));
+    this, get_clock(), std::chrono::nanoseconds(period_ns_),
+    std::bind(&EkfLocalizer::timerCallback, this));
 }
 
 bool EkfLocalizer::tryCreateFilter()
@@ -228,7 +231,41 @@ void EkfLocalizer::timerCallback()
   if (stamp <= last_publish_stamp_) {return;}
   last_publish_stamp_ = stamp;
 
-  publish(filter_.lagged->predicted(t), stamp);
+  const EkfCore ekf = filter_.lagged->predicted(t);
+  if (cfg_.tf_future_steps > 0) {
+    publishTfGrid(stamp.nanoseconds());
+  } else {
+    tf_broadcaster_->sendTransform(tfMsg(ekf, stamp));
+  }
+  publish(ekf, stamp);
+}
+
+void EkfLocalizer::publishTfGrid(int64_t t_ns)
+{
+  // 刻み k·T の TF を、今より後の tf_future_steps 個と今以前の tf_past_steps 個、1 つのメッセージで送る。
+  // 同じ刻みは周期ごとに新しい値で送り直し、購読側の tf2 で置き換わる。値は t 以前の観測だけを入れた状態を
+  // その刻みまで予測したもの（未来の刻みは最新の状態の予測、過ぎた刻みは遅れて届いた観測も入れた値）
+  std::vector<geometry_msgs::msg::TransformStamped> tfs;
+  for (const int64_t k_ns : tfGridStamps(
+      t_ns, period_ns_, cfg_.tf_future_steps, cfg_.tf_past_steps))
+  {
+    const double tk = static_cast<double>(k_ns) * 1e-9;
+    const EkfCore ekf = filter_.lagged->at(tk);
+    // 初期化より前の刻みと、履歴の起点より前の刻み（起点の時刻のまま進まない）は送らない
+    if (!ekf.initialized() || ekf.lastStamp() > tk) {continue;}
+    tfs.push_back(tfMsg(ekf, rclcpp::Time(k_ns, RCL_ROS_TIME)));
+  }
+  if (!tfs.empty()) {tf_broadcaster_->sendTransform(tfs);}
+}
+
+geometry_msgs::msg::TransformStamped EkfLocalizer::tfMsg(
+  const EkfCore & ekf, const rclcpp::Time & stamp) const
+{
+  geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf.basePose());
+  tf.header.stamp = stamp;
+  tf.header.frame_id = cfg_.map_frame_id;
+  tf.child_frame_id = cfg_.base_frame_id;
+  return tf;
 }
 
 geometry_msgs::msg::PoseWithCovarianceStamped EkfLocalizer::basePoseMsg(
@@ -261,12 +298,6 @@ geometry_msgs::msg::PoseWithCovarianceStamped EkfLocalizer::lidarPoseMsg(
 
 void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
 {
-  geometry_msgs::msg::TransformStamped tf = tf2::eigenToTransform(ekf.basePose());
-  tf.header.stamp = stamp;
-  tf.header.frame_id = cfg_.map_frame_id;
-  tf.child_frame_id = cfg_.base_frame_id;
-  tf_broadcaster_->sendTransform(tf);
-
   // /ekf_pose：map → LiDAR
   ekf_pose_pub_->publish(lidarPoseMsg(ekf, stamp));
 

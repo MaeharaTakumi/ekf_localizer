@@ -23,7 +23,9 @@ namespace ekf_localizer
 ///         トピック名は ndt_pose_topic / odom_topic / initialpose_topic で変えられる
 ///   出力  predict_rate の周期で、最新の状態を現在時刻まで予測した TF map → base、ekf_pose（map → LiDAR）、
 ///         ekf_odom（map → base、v, omega）。NDT は点群の stamp の時刻の TF を初期値にし、MATLAB などは
-///         最新の TF（今の姿勢）と点群の stamp の時刻の TF（点群の座標変換）を引く
+///         最新の TF（今の姿勢）と点群の stamp の時刻の TF（点群の座標変換）を引く。
+///         tf_future_steps >= 1 なら TF は周期の刻みの stamp で、今より先の刻みも送る（購読側が点群の stamp の
+///         TF を待たずに引けるように。同じ刻みは周期ごとに送り直して置き換える）
 ///
 ///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻は time_source で選ぶ。
 ///     stamp    メッセージの stamp。NDT は遅れて届くので、点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す
@@ -49,8 +51,12 @@ private:
   double ndtTime(const builtin_interfaces::msg::Time & stamp);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
-  /// ekf の推定値を stamp の時刻として配信する
+  /// ekf の推定値を stamp の時刻として ekf_pose・ekf_odom に配信する（TF は timerCallback が送る）
   void publish(const EkfCore & ekf, const rclcpp::Time & stamp);
+  /// tf_future_steps >= 1 のとき：時刻 t_ns の前後の刻みの TF map → base をまとめて送る
+  void publishTfGrid(int64_t t_ns);
+  /// TF map → base
+  geometry_msgs::msg::TransformStamped tfMsg(const EkfCore & ekf, const rclcpp::Time & stamp) const;
   /// map → base の姿勢と共分散（base の 6x6）
   geometry_msgs::msg::PoseWithCovarianceStamped basePoseMsg(
     const EkfCore & ekf, const rclcpp::Time & stamp) const;
@@ -65,6 +71,8 @@ private:
   std::map<const ObservationModel *, rclcpp::Time> too_old_warned_;
   /// 最後に配信した時刻（同じ時刻で 2 回出さない）
   rclcpp::Time last_publish_stamp_;
+  /// タイマーの周期と TF の刻みの幅 [ns]（1 / predict_rate）
+  int64_t period_ns_{20000000};
   /// time_source: receipt で、点群の stamp [ns] → 受信した時刻 [s]（history_length より古いものは捨てる）
   std::map<int64_t, double> cloud_receipt_;
 
