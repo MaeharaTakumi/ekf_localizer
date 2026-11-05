@@ -57,39 +57,48 @@ void EkfCore::wrapAngles(StateVector & x)
 
 EkfCore::StateVector EkfCore::propagate(const StateVector & x, double dt)
 {
-  // 水平面を移動すると仮定し、車体 x 軸方向の速度 v と yaw の角速度 omega を中点法（RK2）で積分する：
-  //   yaw_m = yaw + omega dt / 2（区間の中点の向き）
-  //   x += v dt cos(yaw_m)、y += v dt sin(yaw_m)、yaw += omega dt
-  // roll, pitch による v, omega の分解は考えない。z, roll, pitch は予測では動かさず、Q のノイズだけを与える。
-  // v, omega はランダムウォーク
-  const double v = x(kV);
-  const double omega = x(kOmega);
-  const double yaw_m = x(kYaw) + 0.5 * omega * dt;
+  // 各軸は独立。水平面を移動すると仮定し、水平面の前向きの速さ v_xy と yaw の角速度 omega_yaw を
+  // 中点法（RK2）で積分する：
+  //   yaw_m = yaw + omega_yaw dt / 2（区間の中点の向き）
+  //   x += v_xy dt cos(yaw_m)、y += v_xy dt sin(yaw_m)、yaw += omega_yaw dt
+  // z, roll, pitch はそれぞれ v_z, omega_roll, omega_pitch で積分する。速度は区間の中で一定なので、
+  // 中点法でも厳密な積分と同じ：z += v_z dt、roll += omega_roll dt、pitch += omega_pitch dt
+  // roll, pitch による v_xy, omega_yaw の分解は考えない。速度 5 つはランダムウォーク
+  const double v_xy = x(kVxy);
+  const double omega_yaw = x(kOmegaYaw);
+  const double yaw_m = x(kYaw) + 0.5 * omega_yaw * dt;
 
   StateVector xn = x;
-  xn(kX) += v * dt * std::cos(yaw_m);
-  xn(kY) += v * dt * std::sin(yaw_m);
-  xn(kYaw) = normalizeAngle(x(kYaw) + omega * dt);
+  xn(kX) += v_xy * dt * std::cos(yaw_m);
+  xn(kY) += v_xy * dt * std::sin(yaw_m);
+  xn(kZ) += x(kVz) * dt;
+  // roll, pitch は更新のたびに wrapAngles で wrap する（ここで wrap すると角速度 0 でも丸めで値が変わる）
+  xn(kRoll) += x(kOmegaRoll) * dt;
+  xn(kPitch) += x(kOmegaPitch) * dt;
+  xn(kYaw) = normalizeAngle(x(kYaw) + omega_yaw * dt);
   return xn;
 }
 
 EkfCore::StateMatrix EkfCore::transitionJacobian(const StateVector & x, double dt)
 {
-  const double v = x(kV);
-  const double omega = x(kOmega);
-  const double yaw_m = x(kYaw) + 0.5 * omega * dt;
+  const double v_xy = x(kVxy);
+  const double omega_yaw = x(kOmegaYaw);
+  const double yaw_m = x(kYaw) + 0.5 * omega_yaw * dt;
   const double c = std::cos(yaw_m);
   const double s = std::sin(yaw_m);
 
   StateMatrix F = StateMatrix::Identity();
-  F(kX, kYaw) = -v * dt * s;
-  F(kY, kYaw) = v * dt * c;
-  F(kX, kV) = dt * c;
-  F(kY, kV) = dt * s;
-  // d(yaw_m)/d(omega) = dt / 2
-  F(kX, kOmega) = -0.5 * v * dt * dt * s;
-  F(kY, kOmega) = 0.5 * v * dt * dt * c;
-  F(kYaw, kOmega) = dt;
+  F(kX, kYaw) = -v_xy * dt * s;
+  F(kY, kYaw) = v_xy * dt * c;
+  F(kX, kVxy) = dt * c;
+  F(kY, kVxy) = dt * s;
+  // d(yaw_m)/d(omega_yaw) = dt / 2
+  F(kX, kOmegaYaw) = -0.5 * v_xy * dt * dt * s;
+  F(kY, kOmegaYaw) = 0.5 * v_xy * dt * dt * c;
+  F(kYaw, kOmegaYaw) = dt;
+  F(kZ, kVz) = dt;
+  F(kRoll, kOmegaRoll) = dt;
+  F(kPitch, kOmegaPitch) = dt;
   return F;
 }
 

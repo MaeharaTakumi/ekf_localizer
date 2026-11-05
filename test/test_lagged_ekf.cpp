@@ -50,8 +50,8 @@ struct Filter
 Filter makeFilter(bool use_odom = true)
 {
   EkfCore::Params cp;
-  cp.q << 5e-2, 5e-2, 5e-3, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
-  cp.p_init << 2e-2, 2e-2, 2e-2, 0.06, 0.06, 2e-3, 1.0, 1.0;
+  cp.q << 5e-2, 5e-2, 5e-3, 5e-2, 5e-2, 5e-2, 0.05, 0.0, 0.0, 0.0, 0.1;
+  cp.p_init << 2e-2, 2e-2, 2e-2, 0.06, 0.06, 2e-3, 1.0, 0.0, 0.0, 0.0, 1.0;
   NdtModel::Params np;
   np.r << 1e-2, 1e-2, 1e-2, 0.03, 0.03, 1e-3;
   Filter f{EkfCore(cp), nullptr, nullptr};

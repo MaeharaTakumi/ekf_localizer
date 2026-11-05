@@ -24,8 +24,10 @@
       base_frame_id: "base_link"
       lidar_frame_id: "velodyne"
 
-      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 1.0e-2] # [x, y, z, roll, pitch, yaw, v, omega]
-      P_init: [2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.01]
+      # Q・P_init の並びは状態と同じ [x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw]。
+      # v_z・omega_roll・omega_pitch の Q と P_init を 0 にすると、その 3 つは 0 のまま（z・roll・pitch は Q のノイズだけで動かない）
+      Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 0.0, 0.0, 0.0, 1.0e-2]
+      P_init: [2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.0, 0.0, 0.0, 0.01]
       R_ndt:  [1.0e-2, 1.0e-2, 1.0e-2, 0.03, 0.03, 1.0e-3] # [x, y, z, roll, pitch, yaw]（LiDAR）
       R_odom: [2.5e-3, 5.0e-3]  # [v, omega]
 

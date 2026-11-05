@@ -20,23 +20,23 @@ bool OdomModel::aidInitialization(EkfCore & core, const Measurement & m, double 
 {
   // 走行中に初期化し直したとき、v = 0 から出発して NDT に追いつくまでの過渡をなくす
   if (std::abs(t_init - m.stamp) > prm_.timeout_init) {return false;}
-  core.mutableState()(EkfCore::kV) = m.z(0);
-  core.mutableState()(EkfCore::kOmega) = m.z(1);
+  core.mutableState()(EkfCore::kVxy) = m.z(0);
+  core.mutableState()(EkfCore::kOmegaYaw) = m.z(1);
   // 姿勢との相関は初期化直後なので 0 のまま
-  core.mutableCovariance()(EkfCore::kV, EkfCore::kV) = m.r(0);
-  core.mutableCovariance()(EkfCore::kOmega, EkfCore::kOmega) = m.r(1);
+  core.mutableCovariance()(EkfCore::kVxy, EkfCore::kVxy) = m.r(0);
+  core.mutableCovariance()(EkfCore::kOmegaYaw, EkfCore::kOmegaYaw) = m.r(1);
   return true;
 }
 
 std::vector<StageResult> OdomModel::update(EkfCore & core, const Measurement & m) const
 {
-  // h(x) = [v, omega]。H は v, omega の列だけが 1
+  // h(x) = [v_xy, omega_yaw]。H は v_xy, omega_yaw の列だけが 1
   Eigen::Matrix<double, 2, EkfCore::kN> H = Eigen::Matrix<double, 2, EkfCore::kN>::Zero();
-  H(0, EkfCore::kV) = 1.0;
-  H(1, EkfCore::kOmega) = 1.0;
+  H(0, EkfCore::kVxy) = 1.0;
+  H(1, EkfCore::kOmegaYaw) = 1.0;
   const EkfCore::StateVector & x = core.state();
   const Eigen::Vector2d z = m.z;
-  const Eigen::Vector2d y = z - Eigen::Vector2d(x(EkfCore::kV), x(EkfCore::kOmega));
+  const Eigen::Vector2d y = z - Eigen::Vector2d(x(EkfCore::kVxy), x(EkfCore::kOmegaYaw));
   const Eigen::Matrix2d R = Eigen::Vector2d(m.r).asDiagonal();
 
   EkfCore::GateState & gate = core.gate(gate_);

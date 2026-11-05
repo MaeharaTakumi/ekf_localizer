@@ -140,7 +140,7 @@ void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
     const EkfCore & ekf = filter_.lagged->current();
     const MeasurementPtr & aid = ekf.initAid();
     RCLCPP_INFO(
-      get_logger(), "EKF initialized by %s (v, omega = %.3f, %.3f from %s).", model.name(),
+      get_logger(), "EKF initialized by %s (v_xy, omega_yaw = %.3f, %.3f from %s).", model.name(),
       ekf.velocity(), ekf.angularVelocity(), o.aided ? aid->model->name() : "zero");
     return;
   }
@@ -191,7 +191,7 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
     }
   }
 
-  // twist は child_frame_id（base）座標なので linear.x, angular.z がそのまま v, omega
+  // twist は child_frame_id（base）座標なので linear.x, angular.z を v_xy, omega_yaw の観測にする
   const double v = msg->twist.twist.linear.x;
   const double omega = msg->twist.twist.angular.z;
   // twist が表す動きは stamp より odom_delay だけ前のもの（diff_drive_controller の移動平均など）
@@ -301,7 +301,8 @@ void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
   // /ekf_pose：map → LiDAR
   ekf_pose_pub_->publish(lidarPoseMsg(ekf, stamp));
 
-  // /ekf_odom：map → base と、base 座標の v, omega
+  // /ekf_odom：map → base と、v_xy, omega_yaw（linear.x, angular.z）。
+  // v_z, omega_roll, omega_pitch は地図の z とオイラー角の変化率で base 座標の twist と合わないので出さない
   const geometry_msgs::msg::PoseWithCovarianceStamped base = basePoseMsg(ekf, stamp);
   nav_msgs::msg::Odometry odom;
   odom.header = base.header;
@@ -310,10 +311,10 @@ void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
   odom.twist.twist.linear.x = ekf.velocity();
   odom.twist.twist.angular.z = ekf.angularVelocity();
   const auto & P = ekf.covariance();
-  odom.twist.covariance[0] = P(EkfCore::kV, EkfCore::kV);
-  odom.twist.covariance[5] = P(EkfCore::kV, EkfCore::kOmega);
-  odom.twist.covariance[30] = P(EkfCore::kOmega, EkfCore::kV);
-  odom.twist.covariance[35] = P(EkfCore::kOmega, EkfCore::kOmega);
+  odom.twist.covariance[0] = P(EkfCore::kVxy, EkfCore::kVxy);
+  odom.twist.covariance[5] = P(EkfCore::kVxy, EkfCore::kOmegaYaw);
+  odom.twist.covariance[30] = P(EkfCore::kOmegaYaw, EkfCore::kVxy);
+  odom.twist.covariance[35] = P(EkfCore::kOmegaYaw, EkfCore::kOmegaYaw);
   ekf_odom_pub_->publish(odom);
 }
 

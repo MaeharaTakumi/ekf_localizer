@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 namespace ekf_localizer
@@ -23,12 +25,14 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("base_frame_id", "base_link");
   node.declare_parameter("lidar_frame_id", "velodyne");
   node.declare_parameter(
-    "Q", std::vector<double>{1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3, 0.05, 0.2});
+    "Q", std::vector<double>{
+      1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3, 0.05, 0.0, 0.0, 0.0, 0.2});
   node.declare_parameter(
     "R_ndt", std::vector<double>{1.0e-4, 1.0e-4, 1.0e-4, 1.0e-6, 1.0e-6, 1.0e-6});
   node.declare_parameter("max_predict_dt", 0.2);
   node.declare_parameter(
-    "P_init", std::vector<double>{2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6, 1.0, 1.0});
+    "P_init", std::vector<double>{
+      2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6, 1.0, 0.0, 0.0, 0.0, 1.0});
   node.declare_parameter("gate_ndt", 16.81);
   node.declare_parameter("ndt_delay", 0.0);
 
@@ -119,7 +123,8 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   choose("odom_covariance_source", cfg.odom_covariance_source, {"param", "message"});
 
   std::vector<double> q, p_init, r_ndt, r_odom;
-  // Q と P_init は状態と同じ [x, y, z, roll, pitch, yaw, v, omega] の 8 要素
+  // Q と P_init は状態と同じ
+  // [x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw] の 11 要素
   if (load("Q", EkfCore::kN, q)) {
     cfg.core.q = Eigen::Map<const EkfCore::StateVector>(q.data());
   }
@@ -161,8 +166,10 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
   const EkfCore::Params & cprm = cfg.core;
   const NdtModel::Params & nprm = cfg.ndt;
   RCLCPP_INFO(
-    logger, "ekf model: %s 8-state EKF [x,y,z,roll,pitch,yaw,v,omega]%s",
-    cfg.base_frame_id.c_str(), cfg.use_odom ? " + odom observation [v,omega]" : " (odom unused)");
+    logger, "ekf model: %s 11-state EKF "
+    "[x,y,z,roll,pitch,yaw,v_xy,v_z,omega_roll,omega_pitch,omega_yaw]%s",
+    cfg.base_frame_id.c_str(),
+    cfg.use_odom ? " + odom observation [v_xy,omega_yaw]" : " (odom unused)");
   RCLCPP_INFO(
     logger, "ekf topics: ndt_pose: %s, odom: %s, initialpose: %s",
     cfg.ndt_pose_topic.c_str(), cfg.odom_topic.c_str(), cfg.initialpose_topic.c_str());
@@ -185,16 +192,24 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     " (odometry: receipt time, NDT: receipt time of its point cloud on points_topic)" : "");
   RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", cprm.max_predict_dt);
   RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", cfg.ndt_delay);
+  const auto join = [](const EkfCore::StateVector & v) {
+      std::string out;
+      for (int i = 0; i < v.size(); ++i) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%s%g", i == 0 ? "" : ", ", v(i));
+        out += buf;
+      }
+      return out;
+    };
   RCLCPP_INFO(
-    logger, "ekf Q(x,y,z,roll,pitch,yaw,v,omega): [%g, %g, %g, %g, %g, %g, %g, %g]",
-    cprm.q(0), cprm.q(1), cprm.q(2), cprm.q(3), cprm.q(4), cprm.q(5), cprm.q(6), cprm.q(7));
+    logger, "ekf Q(x,y,z,roll,pitch,yaw,v_xy,v_z,omega_roll,omega_pitch,omega_yaw): [%s]",
+    join(cprm.q).c_str());
   RCLCPP_INFO(
     logger, "ekf R_ndt: [%g, %g, %g, %g, %g, %g]",
     nprm.r(0), nprm.r(1), nprm.r(2), nprm.r(3), nprm.r(4), nprm.r(5));
   RCLCPP_INFO(
-    logger, "ekf P_init(x,y,z,roll,pitch,yaw,v,omega): [%g, %g, %g, %g, %g, %g, %g, %g]",
-    cprm.p_init(0), cprm.p_init(1), cprm.p_init(2), cprm.p_init(3), cprm.p_init(4),
-    cprm.p_init(5), cprm.p_init(6), cprm.p_init(7));
+    logger, "ekf P_init(x,y,z,roll,pitch,yaw,v_xy,v_z,omega_roll,omega_pitch,omega_yaw): [%s]",
+    join(cprm.p_init).c_str());
   if (cfg.use_odom) {
     const OdomModel::Params & oprm = cfg.odom;
     RCLCPP_INFO(

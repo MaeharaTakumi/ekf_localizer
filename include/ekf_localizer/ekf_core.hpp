@@ -23,10 +23,12 @@ Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw);
 
 /// EKF 本体（センサを知らない部分）
 ///
-///   状態 x = [x, y, z, roll, pitch, yaw, v, omega]^T
-///        … map → base の 6 自由度姿勢（ZYX）と、車体の前進速度・ヨー角速度
-///   運動 水平面を移動すると仮定し、x, y, yaw を中点法（RK2）で積分する（roll, pitch による v, omega の
-///        分解は考えない）。z, roll, pitch は予測では動かさず Q のノイズだけ。v, omega はランダムウォーク
+///   状態 x = [x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw]^T
+///        … map → base の 6 自由度姿勢（ZYX）と速度。v_xy は水平面の前向きの速さ（符号付き、後退は負）、
+///          v_z は地図の z の速度、omega_* は roll, pitch, yaw の角度の変化率（機体の角速度ではない）
+///   運動 各軸は独立。水平面を移動すると仮定し、x, y, yaw を中点法（RK2）で積分する（roll, pitch による
+///        v_xy, omega_yaw の分解は考えない）。z, roll, pitch はそれぞれ v_z, omega_roll, omega_pitch で積分する
+///        （線形なので中点法でも厳密な積分と同じ）。速度 5 つはランダムウォーク
 ///   更新 一般形の kalmanUpdate だけを持つ。観測ごとの y, H, R, ゲートは観測モデルが組み立てる
 ///
 ///   履歴（LaggedEkf）の各時点でコピーして持つので、巻き戻しで一緒に戻すべき値もここに置く。
@@ -37,22 +39,30 @@ Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw);
 class EkfCore
 {
 public:
-  static constexpr int kN = 8;
+  static constexpr int kN = 11;
   using StateVector = Eigen::Matrix<double, kN, 1>;
   using StateMatrix = Eigen::Matrix<double, kN, kN>;
 
   /// 状態の添字
-  enum Index {kX = 0, kY, kZ, kRoll, kPitch, kYaw, kV, kOmega};
+  enum Index
+  {
+    kX = 0, kY, kZ, kRoll, kPitch, kYaw,
+    kVxy, kVz, kOmegaRoll, kOmegaPitch, kOmegaYaw
+  };
 
   struct Params
   {
     /// プロセスノイズ（スペクトル密度、状態と同じ並び）
-    /// [x, y, z, roll, pitch, yaw] [m^2/s], [rad^2/s]、[v, omega] [m^2/s^3], [rad^2/s^3]
+    /// [x, y, z, roll, pitch, yaw] [m^2/s], [rad^2/s]、
+    /// [v_xy, v_z, omega_roll, omega_pitch, omega_yaw] [m^2/s^3], [rad^2/s^3]。
+    /// v_z, omega_roll, omega_pitch の Q と p_init が 0 なら、その 3 つは 0 のまま動かない（z, roll, pitch は Q のノイズだけ）
     StateVector q =
-      (StateVector() << 1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3, 0.05, 0.2).finished();
+      (StateVector() << 1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3,
+      0.05, 0.0, 0.0, 0.0, 0.2).finished();
     /// 初期共分散の対角（分散、状態と同じ並び）
     StateVector p_init =
-      (StateVector() << 2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6, 1.0, 1.0).finished();
+      (StateVector() << 2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6,
+      1.0, 0.0, 0.0, 0.0, 1.0).finished();
     /// 1 回の予測で進める dt の上限 [s]
     double max_predict_dt{0.2};
   };
@@ -94,8 +104,10 @@ public:
 
   /// 推定した base の姿勢 map → base（状態そのもの）
   Eigen::Affine3d basePose() const {return poseFromState(x_);}
-  double velocity() const {return x_(kV);}
-  double angularVelocity() const {return x_(kOmega);}
+  /// 水平面の前向きの速さ v_xy
+  double velocity() const {return x_(kVxy);}
+  /// yaw の角速度 omega_yaw
+  double angularVelocity() const {return x_(kOmegaYaw);}
   /// 状態が表している時刻 t_x [s]（最後に予測・初期化した時刻）
   double lastStamp() const {return t_last_;}
   double lastDt() const {return last_dt_;}

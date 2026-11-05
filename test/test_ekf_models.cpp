@@ -61,9 +61,10 @@ TestParams P0()
 {
   TestParams p;
   p.o_x = -0.2; p.o_y = 0.05; p.o_z = 1.2; p.yaw_o = -0.034; p.roll_o = 0.01; p.pitch_o = 0.02;
-  p.core.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.1;
+  // v_z, omega_roll, omega_pitch は Q・P_init とも 0（0 のまま動かない。ekf.yaml の既定と同じ）
+  p.core.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.0, 0.0, 0.0, 0.1;
   p.ndt.r << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 5e-3;
-  p.core.p_init << 2 * p.ndt.r, 1.0, 1.0;
+  p.core.p_init << 2 * p.ndt.r, 1.0, 0.0, 0.0, 0.0, 1.0;
   return p;
 }
 
@@ -261,35 +262,47 @@ TEST(EkfCore, MidpointIntegrationOnHorizontalPlane)
   using E = EkfCore;
   VS x = VS::Zero();
   x(E::kX) = 1.0; x(E::kY) = 2.0; x(E::kZ) = 0.5; x(E::kRoll) = 0.05; x(E::kPitch) = -0.08;
-  x(E::kYaw) = 0.3; x(E::kV) = 1.2; x(E::kOmega) = 0.8;
+  x(E::kYaw) = 0.3; x(E::kVxy) = 1.2; x(E::kOmegaYaw) = 0.8;
+  x(E::kVz) = -0.07; x(E::kOmegaRoll) = 0.02; x(E::kOmegaPitch) = -0.03;
   for (double dt : {0.05, 0.2, 1.0}) {
     const VS xn = EkfCore::propagate(x, dt);
-    const double yaw_m = x(E::kYaw) + 0.5 * x(E::kOmega) * dt;   // 区間の中点の向き
-    EXPECT_NEAR(xn(E::kX), x(E::kX) + x(E::kV) * dt * std::cos(yaw_m), 1e-12) << "dt=" << dt;
-    EXPECT_NEAR(xn(E::kY), x(E::kY) + x(E::kV) * dt * std::sin(yaw_m), 1e-12) << "dt=" << dt;
-    EXPECT_NEAR(normalizeAngle(xn(E::kYaw) - x(E::kYaw) - x(E::kOmega) * dt), 0.0, 1e-12);
-    // 水平面の仮定：roll, pitch があっても v を分解せず、z, roll, pitch は予測で動かない（Q のノイズだけ）
-    EXPECT_DOUBLE_EQ(xn(E::kZ), x(E::kZ));
-    EXPECT_DOUBLE_EQ(xn(E::kRoll), x(E::kRoll));
-    EXPECT_DOUBLE_EQ(xn(E::kPitch), x(E::kPitch));
-    EXPECT_DOUBLE_EQ(xn(E::kV), x(E::kV));
-    EXPECT_DOUBLE_EQ(xn(E::kOmega), x(E::kOmega));
+    const double yaw_m = x(E::kYaw) + 0.5 * x(E::kOmegaYaw) * dt;   // 区間の中点の向き
+    EXPECT_NEAR(xn(E::kX), x(E::kX) + x(E::kVxy) * dt * std::cos(yaw_m), 1e-12) << "dt=" << dt;
+    EXPECT_NEAR(xn(E::kY), x(E::kY) + x(E::kVxy) * dt * std::sin(yaw_m), 1e-12) << "dt=" << dt;
+    EXPECT_NEAR(normalizeAngle(xn(E::kYaw) - x(E::kYaw) - x(E::kOmegaYaw) * dt), 0.0, 1e-12);
+    // 各軸は独立：z, roll, pitch はそれぞれの速度だけで動き、roll, pitch があっても v_xy を分解しない
+    EXPECT_NEAR(xn(E::kZ), x(E::kZ) + x(E::kVz) * dt, 1e-12) << "dt=" << dt;
+    EXPECT_NEAR(xn(E::kRoll), x(E::kRoll) + x(E::kOmegaRoll) * dt, 1e-12) << "dt=" << dt;
+    EXPECT_NEAR(xn(E::kPitch), x(E::kPitch) + x(E::kOmegaPitch) * dt, 1e-12) << "dt=" << dt;
+    for (int i = E::kVxy; i < E::kN; ++i) {
+      EXPECT_DOUBLE_EQ(xn(i), x(i)) << "速度はランダムウォーク i=" << i;
+    }
   }
+  // 速度 v_z, omega_roll, omega_pitch が 0 なら z, roll, pitch は予測で変わらない（足す前の 8 状態と同じ）
+  VS x0 = x;
+  x0(E::kVz) = x0(E::kOmegaRoll) = x0(E::kOmegaPitch) = 0.0;
+  const VS x0n = EkfCore::propagate(x0, 0.2);
+  EXPECT_EQ(x0n(E::kZ), x0(E::kZ));
+  EXPECT_EQ(x0n(E::kRoll), x0(E::kRoll));
+  EXPECT_EQ(x0n(E::kPitch), x0(E::kPitch));
   // 円弧の厳密解とは向きが同じ（中点の向き）で、長さが v dt (1 - sinc(omega dt / 2)) だけ長い（1 ステップで O(dt^3)）
   VS f = x;
   f(E::kRoll) = f(E::kPitch) = 0.0;
   for (double dt : {0.05, 0.2}) {
     const VS xn = EkfCore::propagate(f, dt);
-    const double R = f(E::kV) / f(E::kOmega), u = 0.5 * f(E::kOmega) * dt;
-    const double ex = f(E::kX) + R * (std::sin(f(E::kYaw) + f(E::kOmega) * dt) - std::sin(f(E::kYaw)));
-    const double ey = f(E::kY) - R * (std::cos(f(E::kYaw) + f(E::kOmega) * dt) - std::cos(f(E::kYaw)));
+    const double R = f(E::kVxy) / f(E::kOmegaYaw), u = 0.5 * f(E::kOmegaYaw) * dt;
+    const double ex =
+      f(E::kX) + R * (std::sin(f(E::kYaw) + f(E::kOmegaYaw) * dt) - std::sin(f(E::kYaw)));
+    const double ey =
+      f(E::kY) - R * (std::cos(f(E::kYaw) + f(E::kOmegaYaw) * dt) - std::cos(f(E::kYaw)));
     EXPECT_NEAR(
-      std::hypot(xn(E::kX) - ex, xn(E::kY) - ey), f(E::kV) * dt * (1.0 - std::sin(u) / u), 1e-12) << "dt=" << dt;
+      std::hypot(xn(E::kX) - ex, xn(E::kY) - ey), f(E::kVxy) * dt * (1.0 - std::sin(u) / u), 1e-12)
+      << "dt=" << dt;
   }
   VS a = VS::Zero();
-  a(E::kYaw) = 0.3; a(E::kV) = 1.0; a(E::kOmega) = 1e-9;
+  a(E::kYaw) = 0.3; a(E::kVxy) = 1.0; a(E::kOmegaYaw) = 1e-9;
   VS b = a;
-  b(E::kOmega) = 0.0;
+  b(E::kOmegaYaw) = 0.0;
   EXPECT_LT((EkfCore::propagate(a, 0.1) - EkfCore::propagate(b, 0.1)).head<2>().norm(), 1e-9)
     << "omega → 0 で直線に連続（分岐なし）";
 }
@@ -299,7 +312,7 @@ TEST(EkfCore, TransitionJacobianMatchesNumerical)
   for (double w : {0.8, 1e-5, 0.0, -1.3}) {
     for (double th : {0.0, 0.2, -0.08}) {
       VS x;
-      x << 1.0, -2.0, 0.5, 0.05, th, 2.9, 0.9, w;
+      x << 1.0, -2.0, 0.5, 0.05, th, 2.9, 0.9, -0.06, 0.03, -0.04, w;
       const double dt = 0.15, h = 1e-6;
       MS Fn;
       for (int j = 0; j < EkfCore::kN; ++j) {
@@ -325,7 +338,7 @@ TEST(NdtModel, LidarPoseJacobianMatchesAnalytic)
   const auto p = P0();
   Rig rig = makeRig(p, false);
   VS x;
-  x << 1.0, -2.0, 0.3, 0.07, -0.12, 2.9, 0.9, 0.3;
+  x << 1.0, -2.0, 0.3, 0.07, -0.12, 2.9, 0.9, -0.05, 0.02, -0.03, 0.3;
   const auto H = rig.ndt->lidarPoseJacobian(x);
   const double r = x(3), pt = x(4), y = x(5);
   const Eigen::Vector3d o(p.o_x, p.o_y, p.o_z);
@@ -342,7 +355,7 @@ TEST(NdtModel, LidarPoseJacobianMatchesAnalytic)
   EXPECT_LT(((H.block<3, 3>(0, 0)) - Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff(), 1e-8);
   EXPECT_LT(((H.block<3, 3>(0, 3)) - Hp).cwiseAbs().maxCoeff(), 1e-8);
   EXPECT_LT((H.block<3, 3>(3, 0).cwiseAbs().maxCoeff()), 1e-8) << "姿勢は位置に依存しない";
-  EXPECT_LT(H.rightCols<2>().cwiseAbs().maxCoeff(), 1e-12) << "v, omega に依存しない";
+  EXPECT_LT(H.rightCols<EkfCore::kN - 6>().cwiseAbs().maxCoeff(), 1e-12) << "速度に依存しない";
 
   // 水平面（roll = pitch = 0）では旧 5 状態モデルの H と一致する
   VS xf = x;
@@ -556,11 +569,14 @@ struct SlopeResult
   double z_held;        // NDT を止めてから最後までの base z の推定の変化 [m]（ndt_off_from >= 0 のとき）
 };
 
-/// ndt_off_from 以降 NDT を止める（負なら止めない）。noise = 0 で観測ノイズなし
-SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0)
+/// ndt_off_from 以降 NDT を止める（負なら止めない）。noise = 0 で観測ノイズなし。
+/// q_vz > 0 なら v_z を推定する（Q と P_init に q_vz を入れる）
+SlopeResult runSlope(double duration, double ndt_off_from, double noise = 1.0, double q_vz = 0.0)
 {
   auto p = P0();
   p.ndt.r << 1e-2, 1e-2, 1e-2, 1e-4, 1e-4, 1e-3;
+  p.core.q(EkfCore::kVz) = q_vz;
+  p.core.p_init(EkfCore::kVz) = q_vz;
   Rig rig = makeRig(p, false);
   EkfCore & ekf = rig.core;
   std::mt19937 rng(11);
@@ -633,12 +649,22 @@ TEST(NdtModel, SlopeHasNoLeverArmBias)
 
 TEST(NdtModel, SlopeZHeldDuringNdtOutage)
 {
-  // 水平面を移動すると仮定するので、予測では z を動かさない。10 s から 2 s 欠測すると、
+  // v_z の Q・P_init が 0 なら v_z は 0 のままで、予測では z を動かさない。10 s から 2 s 欠測すると、
   // 坂では z が v sin(slope) * 2 s = 0.17 m 遅れる（NDT が戻れば観測で直る）
   const auto r = runSlope(12.0, 10.0);
   std::printf("  傾斜 1/12・NDT 2 s 欠測：z の推定の変化 %.2e m、最後の z 誤差 %.3f m\n", r.z_held, r.z_err_end);
   EXPECT_LT(r.z_held, 1e-9) << "欠測中の予測で z は動かない";
   EXPECT_GT(r.z_err_end, 0.12);
+}
+
+TEST(NdtModel, SlopeZFollowsVzDuringNdtOutage)
+{
+  // v_z を推定すると（Q > 0）、欠測中も z は v_z で坂に沿って進む（真の v_z = v sin(slope) = 0.083 m/s）
+  const auto r = runSlope(12.0, 10.0, 1.0, 1.0e-2);
+  std::printf("  傾斜 1/12・NDT 2 s 欠測・v_z あり：z の推定の変化 %.3f m、最後の z 誤差 %.3f m\n",
+    r.z_held, r.z_err_end);
+  EXPECT_GT(r.z_held, 0.12) << "欠測中も z は v_z で進む（2 s で 0.17 m）";
+  EXPECT_LT(r.z_err_end, 0.08) << "v_z なしの 0.17 m より小さい（観測ノイズ z の sd 0.1 m で v_z にも誤差が残る）";
 }
 
 // ===========================================================================
@@ -660,14 +686,14 @@ TEST(OdomModel, UpdateMatchesGenericKalmanWithH)
   }
   const VS x0 = rig.core.state();
   const MS P = rig.core.covariance();
-  ASSERT_GT(std::abs(P(EkfCore::kX, EkfCore::kV)), 1e-8);
+  ASSERT_GT(std::abs(P(EkfCore::kX, EkfCore::kVxy)), 1e-8);
   const Eigen::Vector2d z(0.9, 1.1), r(2.5e-3, 5.0e-3);
 
   constexpr int N = EkfCore::kN;
   Eigen::Matrix<double, 2, N> H = Eigen::Matrix<double, 2, N>::Zero();
-  H(0, EkfCore::kV) = 1.0;
-  H(1, EkfCore::kOmega) = 1.0;
-  const Eigen::Vector2d y = z - Eigen::Vector2d(x0(EkfCore::kV), x0(EkfCore::kOmega));
+  H(0, EkfCore::kVxy) = 1.0;
+  H(1, EkfCore::kOmegaYaw) = 1.0;
+  const Eigen::Vector2d y = z - Eigen::Vector2d(x0(EkfCore::kVxy), x0(EkfCore::kOmegaYaw));
   const Eigen::Matrix2d R = r.asDiagonal();
   const Eigen::Matrix2d S = H * P * H.transpose() + R;
   const Eigen::Matrix<double, N, 2> K = P * H.transpose() * S.inverse();
@@ -824,15 +850,15 @@ TEST(OdomModel, InitializesVelocityFromRecentOdom)
   EXPECT_TRUE(recent.addNdt(lidarObs(p, 0, 0, 0), 100.0).aided);
   EXPECT_DOUBLE_EQ(recent.core.velocity(), 0.8);
   EXPECT_DOUBLE_EQ(recent.core.angularVelocity(), 0.2);
-  EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kV, EkfCore::kV), r(0));
-  EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kOmega, EkfCore::kOmega), r(1));
+  EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kVxy, EkfCore::kVxy), r(0));
+  EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kOmegaYaw, EkfCore::kOmegaYaw), r(1));
 
   Rig stale = makeRig(p, true);
   stale.addOdom(0.8, 0.2, r, 99.0);   // 1 s 前は odom_timeout_init(0.2) を超える
   EXPECT_FALSE(stale.addNdt(lidarObs(p, 0, 0, 0), 100.0).aided);
   EXPECT_DOUBLE_EQ(stale.core.velocity(), 0.0);
   EXPECT_DOUBLE_EQ(
-    stale.core.covariance()(EkfCore::kV, EkfCore::kV), p.core.p_init(EkfCore::kV));
+    stale.core.covariance()(EkfCore::kVxy, EkfCore::kVxy), p.core.p_init(EkfCore::kVxy));
 
   // reset 後も直近のオドメトリで初期化し直せる（初期姿勢の再設定）
   recent.core.reset();

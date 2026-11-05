@@ -18,14 +18,14 @@ flowchart LR
     nm --> lag
     cbI -->|reset| lag
     lag["LaggedEkf<br/>観測と状態の履歴・巻き戻し"]
-    core["EkfCore<br/>8 状態の EKF 本体"]
+    core["EkfCore<br/>11 状態の EKF 本体"]
     lag -->|観測ごとに<br/>applyMeasurement| core
     cbT -->|最新の状態をコピーして予測| lag
   end
 
   cbT --> tf["/tf map→base"]
   cbT --> ep["/ekf_pose（map→LiDAR）"]
-  cbT --> eo["/ekf_odom（map→base, v, omega）"]
+  cbT --> eo["/ekf_odom（map→base, v_xy, omega_yaw）"]
 ```
 
 | クラス | ファイル | 役割 |
@@ -139,11 +139,41 @@ classDiagram
 |---|---|---|---|
 | 0–2 | x, y, z | m | map 座標での base の位置 |
 | 3–5 | roll, pitch, yaw | rad | map 座標での base の姿勢（ZYX） |
-| 6 | v | m/s | base の前進速度 |
-| 7 | omega | rad/s | ヨー角速度 |
+| 6 | v_xy | m/s | 水平面の前向きの速さ（符号付き、後退は負） |
+| 7 | v_z | m/s | map 座標の z の速度 |
+| 8 | omega_roll | rad/s | roll の変化率（オイラー角の時間微分。機体の角速度ではない） |
+| 9 | omega_pitch | rad/s | pitch の変化率 |
+| 10 | omega_yaw | rad/s | yaw の変化率（ヨー角速度） |
+
+コードの添字は `EkfCore::kX`・`kY`・`kZ`・`kRoll`・`kPitch`・`kYaw`・`kVxy`・`kVz`・`kOmegaRoll`・`kOmegaPitch`・`kOmegaYaw`（2026-11-05 に
+v_z・omega_roll・omega_pitch を足して 8 状態から 11 状態にした。それまでの `kV`・`kOmega` は `kVxy`・`kOmegaYaw`）。
 
 base は `base_frame_id` です（Gazebo：`base_footprint`、実機：`base_link`）。
 NDT が出すのは LiDAR の姿勢なので、base と LiDAR の間を取付 T_BL で変換します。T_BL は起動時に TF（base → `lidar_frame_id`）から読みます。
+
+### 運動モデル（予測）
+
+各軸は独立です。水平面を移動すると仮定し、roll, pitch による v_xy, omega_yaw の分解は考えません（`EkfCore::propagate`）。
+
+```
+連続時間                      離散時間（dt。中点法）
+dx/dt     = v_xy cos(yaw)       yaw_m = yaw + omega_yaw dt / 2（区間の中点の向き）
+dy/dt     = v_xy sin(yaw)       x     += v_xy dt cos(yaw_m)
+dz/dt     = v_z                 y     += v_xy dt sin(yaw_m)
+droll/dt  = omega_roll          z     += v_z dt
+dpitch/dt = omega_pitch         roll  += omega_roll dt
+dyaw/dt   = omega_yaw           pitch += omega_pitch dt
+速度 5 つはランダムウォーク     yaw   += omega_yaw dt（−π〜π に収める）
+（d/dt = 白色ノイズ）           速度 5 つはそのまま
+```
+
+- z, roll, pitch の式は線形で速度は区間の中で一定なので、中点法でも厳密な積分と同じです。
+- ヤコビアン F は単位行列に、x, y の yaw・v_xy・omega_yaw の列（今までと同じ）と、F(z, v_z) = F(roll, omega_roll) = F(pitch, omega_pitch) = dt を足したもの。
+- 共分散は P ← F P Fᵀ + diag(`Q`)·dt。
+- v_z・omega_roll・omega_pitch の `Q` と `P_init` が 0 なら、その 3 つと P のその行・列は 0 のままで、z, roll, pitch は予測で動きません
+  （`Q` のノイズだけ。足す前の 8 状態と同じ）。今の設定（`ekf.yaml`・環境ファイル）はこれです。同じ観測の列を入れて 8 状態と比べると、
+  状態の差は丸め誤差（1e-17 以下）でした（2026-11-05）。
+- `Q` を正にすると、NDT が途切れても z, roll, pitch は v_z・omega_roll・omega_pitch で外挿されます（坂のテスト `SlopeZFollowsVzDuringNdtOutage`）。
 
 **初期化**とは、状態 x と共分散 P に最初の値を入れることです。位置と姿勢が要るので、NDT の解でしか初期化できません（2 章）。
 起動直後と `/initialpose` を受け取った直後は**未初期化**で、次の NDT の解が届くまで何も配信しません。
@@ -235,10 +265,10 @@ flowchart TD
 |---|---|---|
 | 使うとき | 常に | `use_odom: true` のときだけ |
 | 観測値 z | LiDAR の姿勢 T_L を base の姿勢 T_L · T_BL⁻¹ に直し、[x, y, z, roll, pitch, yaw] にしたもの | [v_o, omega_o]（前進速度・ヨー角速度） |
-| 予測した観測値 h(x) | 状態の [x, y, z, roll, pitch, yaw]（H = [I 0]） | [v, omega]（状態の値） |
+| 予測した観測値 h(x) | 状態の [x, y, z, roll, pitch, yaw]（H = [I 0]） | [v_xy, omega_yaw]（状態の値） |
 | 観測ノイズ R | `R_ndt`（LiDAR）を base の姿勢に直したもの J R_ndt Jᵀ（相関込みの 6×6） | `R_odom`（メッセージの値も選べる） |
 | 遅れ t_d | `ndt_delay`（既定 0） | `odom_delay` |
-| 更新の分け方 | 6 成分をまとめて 1 回 | v, omega をまとめて 1 回 |
+| 更新の分け方 | 6 成分をまとめて 1 回 | v_xy, omega_yaw をまとめて 1 回 |
 | ゲート | `gate_ndt` | `gate_odom` |
 | 棄却が続いたとき | 何もしない（WARN だけ） | 何もしない |
 | 未初期化のとき | この値で初期化する | 値を覚えておく（初期化で使う） |
@@ -247,8 +277,8 @@ flowchart TD
 
 - **観測値の取り出し**：姿勢のクォータニオンを roll, pitch, yaw に直します。
 - **初期化**：T_B = T_L · T_BL⁻¹ で状態の位置・姿勢を作り、P = diag(`P_init`)、t_x = t_z とします。
-  v・omega は 0 から始めます。ただし `use_odom: true` で、覚えているオドメトリの時刻 t_o が |t_z − t_o| ≤ `odom_timeout_init`（0.2 秒）なら、
-  v = v_o、omega = omega_o とし、その分散を観測ノイズの値にします（`EKF initialized by NDT (v, omega = ... from Odometry)`）。
+  速度 5 つは 0 から始めます。ただし `use_odom: true` で、覚えているオドメトリの時刻 t_o が |t_z − t_o| ≤ `odom_timeout_init`（0.2 秒）なら、
+  v_xy = v_o、omega_yaw = omega_o とし、その分散を観測ノイズの値にします（`EKF initialized by NDT (v_xy, omega_yaw = ... from Odometry)`）。
 - **base の姿勢に直した更新**：観測には LiDAR の姿勢と `R_ndt` をそのまま持ち、更新のたびに次のように直して、
   共通の流れの判定・更新を 6 成分まとめて 1 回で行います（ゲート `gate_ndt`、既定 16.81 = χ²(6) の 99%）。
   - 観測値：z_B = T_L · T_BL⁻¹ を [x, y, z, roll, pitch, yaw] にしたもの（厳密）。h(x) は状態の先頭 6 成分、H = [I 0]
@@ -322,7 +352,7 @@ flowchart TD
 |---|---|
 | `/tf` | map → base の TF。値は T_B。常に配信する |
 | `/ekf_pose` | map → LiDAR の姿勢 T_B · T_BL と、その共分散 J P Jᵀ。NDT の解と同じ形なので、そのまま比べられる |
-| `/ekf_odom` | map → base の姿勢 T_B とその共分散 P、base の前進速度 v・ヨー角速度 omega とその共分散 |
+| `/ekf_odom` | map → base の姿勢 T_B とその共分散 P、v_xy（`twist.linear.x`）・omega_yaw（`twist.angular.z`）とその共分散。v_z・omega_roll・omega_pitch は出さない |
 
 - J は h のヤコビアンの位置・姿勢の 6 列（∂h/∂[x, y, z, roll, pitch, yaw]）、P は状態の共分散の位置・姿勢の 6×6 です。
 - 3 つは上から順に配信します（並列ではありません）。どれも同じ状態のコピーから作り、stamp はすべて t_pub です。

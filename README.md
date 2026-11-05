@@ -1,10 +1,12 @@
 # ekf_localizer
 
-NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状態 EKF です。
+NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 状態 EKF です。
 処理の流れは [docs/ekf_flow.md](docs/ekf_flow.md) を参照してください。
 
-- 状態：`[x, y, z, roll, pitch, yaw, v, omega]`（`base_frame_id` の姿勢と、前進速度・ヨー角速度）
-- 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v, omega]`（`use_odom: true`）
+- 状態：`[x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw]`（`base_frame_id` の姿勢と、水平面の前向きの速さ・
+  地図の z の速度・roll, pitch, yaw の変化率）。運動は各軸が独立（[docs/ekf_flow.md](docs/ekf_flow.md) の「運動モデル」）。
+  `v_z`・`omega_roll`・`omega_pitch` は `Q`・`P_init` を 0 にすると 0 のまま動かず、足す前の 8 状態と同じになる（今の設定。2026-11-05）
+- 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v_xy, omega_yaw]`（`use_odom: true`）
 - **観測の遅れ**：NDT は `ndt_delay`、オドメトリは `odom_delay` 秒だけ stamp を戻して入れます
   （Gazebo の diff_drive_controller は twist を 0.2 s の移動平均で出すので `odom_delay` は 0.09 s）。
 - **巻き戻し（ルックバック）**：NDT の解は点群の取得時刻の観測として、遅れて届きます。
@@ -16,10 +18,10 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 8 状
 | 種類 | トピック（既定） | 型 | 内容 |
 |---|---|---|---|
 | 入力 | `ndt_pose`（`ndt_pose_topic`） | geometry_msgs/PoseWithCovarianceStamped | NDT の解（map → LiDAR、stamp は点群の取得時刻。`frame_id` は見ない） |
-| 入力 | `odom`（`odom_topic`） | nav_msgs/Odometry | `twist.linear.x`, `twist.angular.z` を v, omega として使う |
+| 入力 | `odom`（`odom_topic`） | nav_msgs/Odometry | `twist.linear.x`, `twist.angular.z` を v_xy, omega_yaw の観測に使う |
 | 入力 | `initialpose`（`initialpose_topic`） | geometry_msgs/PoseWithCovarianceStamped | 受け取ると EKF をリセットし、次の NDT で初期化し直す |
 | 出力 | `ekf_pose` | geometry_msgs/PoseWithCovarianceStamped | map → LiDAR（共分散は観測モデルで伝播） |
-| 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v, omega |
+| 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v_xy（`twist.linear.x`）, omega_yaw（`twist.angular.z`）。v_z・omega_roll・omega_pitch は地図の z とオイラー角の変化率で、base 座標の twist と合わないので出さない |
 | 出力 | TF | | `map_frame_id` → `base_frame_id`（常に配信）。`predict_rate` の周期で、最新の状態を現在時刻まで予測した値。NDT の初期値と MATLAB はこの TF を点群の stamp の時刻で引く（tf2 が前後の値を補間する）。MATLAB は最新の値を今の姿勢にも使う。`tf_future_steps` が 1 以上なら、周期の刻みの stamp で今より先の刻みも送る（下記） |
 | 入力 | `velodyne_points`（`points_topic`） | sensor_msgs/PointCloud2 | `time_source: receipt` のときだけ購読し、受信した時刻を NDT の観測の時刻にする |
 
@@ -78,8 +80,8 @@ NDT の更新も過去の刻みに入り、点群の stamp で引く値が、引
 
 | 名前 | 値 | 説明 |
 |---|---|---|
-| `Q` | [0.05, 0.05, 0.005, 0.05, 0.05, 0.05, 0.05, 0.01] | プロセスノイズ（スペクトル密度）[x, y, z, roll, pitch, yaw, v, omega]。単位 [m²/s], [rad²/s], [m²/s³], [rad²/s³]。v, omega は速度がどれだけ急に変わりうるか |
-| `P_init` | [0.2, 0.2, 0.2, 0.01, 0.01, 0.01, 0.01, 0.01] | 初期化したときの共分散（分散、base）[x, y, z, roll, pitch, yaw, v, omega] |
+| `Q` | [0.05, 0.05, 0.005, 0.05, 0.05, 0.05, 0.05, 0, 0, 0, 0.01] | プロセスノイズ（スペクトル密度）[x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw] の 11 要素。単位 [m²/s], [rad²/s], [m²/s³], [rad²/s³]。速度は、速度がどれだけ急に変わりうるか。要素数が違うと WARN を出してコードの既定値になる（8 要素の古い設定も） |
+| `P_init` | [0.2, 0.2, 0.2, 0.01, 0.01, 0.01, 0.01, 0, 0, 0, 0.01] | 初期化したときの共分散（分散、base）。並びは `Q` と同じ |
 | `R_ndt` | [0.01, 0.01, 0.01, 0.03, 0.03, 0.001] | NDT の観測ノイズ（分散、LiDAR）[x, y, z, roll, pitch, yaw]。`ndt_pose` の共分散は使わない。更新では取付で base の姿勢の共分散（相関込み）に直して使う |
 | `R_odom` | [0.0025, 0.005] | オドメトリの観測ノイズ（分散）[v, omega] [m²/s²], [rad²/s²] |
 
