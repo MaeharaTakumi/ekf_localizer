@@ -5,7 +5,8 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 
 - 状態：`[x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw]`（`base_frame_id` の姿勢と、水平面の前向きの速さ・
   地図の z の速度・roll, pitch, yaw の変化率）。運動は各軸が独立（[docs/ekf_flow.md](docs/ekf_flow.md) の「運動モデル」）。
-  `v_z`・`omega_roll`・`omega_pitch` は `Q`・`P_init` を 0 にすると 0 のまま動かず、足す前の 8 状態と同じになる（今の設定。2026-11-05）
+  `v_z`・`omega_roll`・`omega_pitch` は `Q`・`P_init` を 0 にすると 0 のまま動かず、足す前の 8 状態と同じになる（`ekf.yaml` の既定と Gazebo。
+  実機 blue の環境ファイルは `omega_roll`・`omega_pitch` の `Q` 0.1。2026-11-07）
 - 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v_xy, omega_yaw]`（`use_odom: true`）
 - **観測の遅れ**：NDT は `ndt_delay`、オドメトリは `odom_delay` 秒だけ stamp を戻して入れます
   （Gazebo の diff_drive_controller は twist を 0.2 s の移動平均で出すので `odom_delay` は 0.09 s）。

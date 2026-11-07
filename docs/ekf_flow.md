@@ -171,8 +171,11 @@ dyaw/dt   = omega_yaw           pitch += omega_pitch dt
 - ヤコビアン F は単位行列に、x, y の yaw・v_xy・omega_yaw の列（今までと同じ）と、F(z, v_z) = F(roll, omega_roll) = F(pitch, omega_pitch) = dt を足したもの。
 - 共分散は P ← F P Fᵀ + diag(`Q`)·dt。
 - v_z・omega_roll・omega_pitch の `Q` と `P_init` が 0 なら、その 3 つと P のその行・列は 0 のままで、z, roll, pitch は予測で動きません
-  （`Q` のノイズだけ。足す前の 8 状態と同じ）。今の設定（`ekf.yaml`・環境ファイル）はこれです。同じ観測の列を入れて 8 状態と比べると、
+  （`Q` のノイズだけ。足す前の 8 状態と同じ）。`ekf.yaml` の既定と Gazebo（`gazebo.yaml`）はこれです。同じ観測の列を入れて 8 状態と比べると、
   状態の差は丸め誤差（1e-17 以下）でした（2026-11-05）。
+- 実機 blue（`blue.yaml`）は omega_roll・omega_pitch の `Q` 0.1、v_z は 0（2026-11-07）。実機は傾きが動くので、点群の時刻の予測値（NDT の初期値）と
+  NDT の解の roll・pitch の差が小さくなる（調整に使っていない録画で −9 %・−5 %）。Gazebo は真の roll・pitch がほとんど動かず、0.1 にすると
+  真値との差が 15 % ほど悪くなるので 0。
 - `Q` を正にすると、NDT が途切れても z, roll, pitch は v_z・omega_roll・omega_pitch で外挿されます（坂のテスト `SlopeZFollowsVzDuringNdtOutage`）。
 
 **初期化**とは、状態 x と共分散 P に最初の値を入れることです。位置と姿勢が要るので、NDT の解でしか初期化できません（2 章）。
