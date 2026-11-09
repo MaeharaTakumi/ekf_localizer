@@ -23,8 +23,12 @@ class OdomModel : public ObservationModel
 public:
   struct Params
   {
-    /// 観測ノイズ [v, omega] の分散 [m^2/s^2], [rad^2/s^2]
-    Eigen::Vector2d r{2.5e-3, 5.0e-3};
+    /// 観測ノイズ [v, omega] の分散 [m^2/s^2], [rad^2/s^2]（速さ・加速度によらない分）
+    Eigen::Vector2d r{6.08e-3, 9.92e-4};
+    /// 速さに応じた分の係数 [v^2 -> R_v, omega^2 -> R_v, v^2 -> R_omega, omega^2 -> R_omega]
+    Eigen::Vector4d alpha{Eigen::Vector4d::Zero()};
+    /// 加速度に応じた分の時定数 [tau_v, tau_omega] [s]
+    Eigen::Vector2d tau{Eigen::Vector2d::Zero()};
     /// ゲート（既定 chi2(2, 0.99)）
     double gate{9.21};
     /// 初期化の時刻からこの秒数以内のオドメトリがあれば、v, omega をその値で初期化する
@@ -34,7 +38,7 @@ public:
   /// core にゲートを 1 つ確保する
   OdomModel(const Params & p, EkfCore & core);
 
-  /// [v, omega]（t_z）を観測にする。r は観測ノイズの分散（Params::r かメッセージの値）
+  /// [v, omega]（t_z）を観測にする。r は観測ノイズの分散（OdomNoise::update の値）
   MeasurementPtr measurement(double v, double omega, const Eigen::Vector2d & r, double stamp) const;
 
   const char * name() const override {return "Odometry";}
@@ -48,6 +52,27 @@ public:
 private:
   Params prm_;
   int gate_;
+};
+
+/// オドメトリの観測ノイズ（分散）を、速さと加速度から計算する
+///
+///   R_v     = r[0] + alpha[0] v^2 + alpha[1] omega^2 + (tau[0] a)^2
+///   R_omega = r[1] + alpha[2] v^2 + alpha[3] omega^2 + (tau[1] alpha_z)^2
+///   a = dv/dt、alpha_z = domega/dt は直前のメッセージとの差。stamp が進まなければ前の値のまま。最初は 0
+class OdomNoise
+{
+public:
+  explicit OdomNoise(const OdomModel::Params & p);
+
+  /// 時刻 stamp の v, omega から [R_v, R_omega] を計算する
+  Eigen::Vector2d update(double stamp, double v, double omega);
+
+private:
+  OdomModel::Params prm_;
+  bool has_prev_{false};
+  double prev_stamp_{0.0};
+  Eigen::Vector2d prev_{Eigen::Vector2d::Zero()};
+  Eigen::Vector2d accel_{Eigen::Vector2d::Zero()};
 };
 
 }  // namespace ekf_localizer

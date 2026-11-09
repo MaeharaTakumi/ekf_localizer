@@ -38,8 +38,6 @@ struct EkfConfig
   std::string base_frame_id{"base_link"};
   /// NDT が推定する LiDAR のフレーム（取付 base → LiDAR は TF から読む）
   std::string lidar_frame_id{"velodyne"};
-  /// オドメトリ観測ノイズの出どころ："param"（R_odom）or "message"（twist.covariance）
-  std::string odom_covariance_source{"param"};
   /// NDT の遅れ [s]。点群の取得時刻が stamp より前の分を、stamp から引いて補う
   double ndt_delay{0.0};
   /// オドメトリの遅れ [s]。twist が実際の動きより遅れる分（移動平均など）を、stamp から引いて補う
@@ -57,6 +55,8 @@ struct EkfFilter
   std::shared_ptr<const NdtModel> ndt;
   /// use_odom: false なら null
   std::shared_ptr<const OdomModel> odom;
+  /// オドメトリの観測ノイズの計算（直前の速度を覚える）。use_odom: false なら null
+  std::shared_ptr<OdomNoise> odom_noise;
   std::unique_ptr<LaggedEkf> lagged;
 };
 

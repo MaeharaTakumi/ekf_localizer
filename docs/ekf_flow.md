@@ -269,7 +269,7 @@ flowchart TD
 | 使うとき | 常に | `use_odom: true` のときだけ |
 | 観測値 z | LiDAR の姿勢 T_L を base の姿勢 T_L · T_BL⁻¹ に直し、[x, y, z, roll, pitch, yaw] にしたもの | [v_o, omega_o]（前進速度・ヨー角速度） |
 | 予測した観測値 h(x) | 状態の [x, y, z, roll, pitch, yaw]（H = [I 0]） | [v_xy, omega_yaw]（状態の値） |
-| 観測ノイズ R | `R_ndt`（LiDAR）を base の姿勢に直したもの J R_ndt Jᵀ（相関込みの 6×6） | `R_odom`（メッセージの値も選べる） |
+| 観測ノイズ R | `R_ndt`（LiDAR）を base の姿勢に直したもの J R_ndt Jᵀ（相関込みの 6×6） | `R_odom` と速さ・加速度から計算した値 |
 | 遅れ t_d | `ndt_delay`（既定 0） | `odom_delay` |
 | 更新の分け方 | 6 成分をまとめて 1 回 | v_xy, omega_yaw をまとめて 1 回 |
 | ゲート | `gate_ndt` | `gate_odom` |
@@ -292,7 +292,7 @@ flowchart TD
 
 ### オドメトリだけの内容
 
-- **観測ノイズ**：`R_odom` を使います。`odom_covariance_source: "message"` のときはメッセージの分散（`twist.covariance` の v と omega の成分）を使い、値が正でなければ `R_odom` に戻します。
+- **観測ノイズ**：`OdomNoise` が R_v = `R_odom[0]` + a₀v² + a₁ω² + (τ₀·dv/dt)²、R_omega = `R_odom[1]` + a₂v² + a₃ω² + (τ₁·dω/dt)² を計算します（a は `odom_noise_alpha`、τ は `accel_noise_tau`。加速度は直前のメッセージとの差）。メッセージの共分散（`twist.covariance`）は使いません。
 
 ## 3. 巻き戻しと再計算（`LaggedEkf`）
 

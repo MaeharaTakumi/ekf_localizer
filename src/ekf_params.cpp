@@ -35,8 +35,9 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("ndt_delay", 0.0);
 
   // オドメトリ観測（use_odom: true のみ）
-  node.declare_parameter("odom_covariance_source", "param");
-  node.declare_parameter("R_odom", std::vector<double>{2.5e-3, 5.0e-3});
+  node.declare_parameter("R_odom", std::vector<double>{6.08e-3, 9.92e-4});
+  node.declare_parameter("odom_noise_alpha", std::vector<double>{0.0, 0.0, 0.0, 0.0});
+  node.declare_parameter("accel_noise_tau", std::vector<double>{0.0, 0.0});
   node.declare_parameter("gate_odom", 9.21);
   node.declare_parameter("odom_timeout_init", 0.2);
   node.declare_parameter("odom_delay", 0.0);
@@ -57,18 +58,6 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
         return false;
       }
       return true;
-    };
-  // 文字列パラメータ。候補外なら先頭の候補に戻す
-  const auto choose = [&](const std::string & name, std::string & out,
-      std::initializer_list<const char *> candidates) {
-      node.get_parameter(name, out);
-      for (const char * c : candidates) {
-        if (out == c) {return;}
-      }
-      const char * fallback = *candidates.begin();
-      RCLCPP_WARN(
-        logger, "Unknown %s \"%s\". Falling back to \"%s\".", name.c_str(), out.c_str(), fallback);
-      out = fallback;
     };
 
   node.get_parameter("use_odom", cfg.use_odom);
@@ -116,9 +105,8 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   node.get_parameter("map_frame_id", cfg.map_frame_id);
   node.get_parameter("base_frame_id", cfg.base_frame_id);
   node.get_parameter("lidar_frame_id", cfg.lidar_frame_id);
-  choose("odom_covariance_source", cfg.odom_covariance_source, {"param", "message"});
 
-  std::vector<double> q, p_init, r_ndt, r_odom;
+  std::vector<double> q, p_init, r_ndt, r_odom, odom_alpha, odom_tau;
   // Q と P_init は状態と同じ
   // [x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw] の 11 要素
   if (load("Q", EkfCore::kN, q)) {
@@ -143,7 +131,23 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
 
   OdomModel::Params & oprm = cfg.odom;
   if (load("R_odom", 2, r_odom)) {
-    oprm.r = Eigen::Map<const Eigen::Vector2d>(r_odom.data());
+    const Eigen::Map<const Eigen::Vector2d> r(r_odom.data());
+    if ((r.array() > 0.0).all()) {
+      oprm.r = r;
+    } else {
+      RCLCPP_WARN(logger, "R_odom must be positive (got [%g, %g]). Using default.", r(0), r(1));
+    }
+  }
+  if (load("odom_noise_alpha", 4, odom_alpha)) {
+    const Eigen::Map<const Eigen::Vector4d> a(odom_alpha.data());
+    if ((a.array() >= 0.0).all()) {
+      oprm.alpha = a;
+    } else {
+      RCLCPP_WARN(logger, "odom_noise_alpha must not be negative. Using default.");
+    }
+  }
+  if (load("accel_noise_tau", 2, odom_tau)) {
+    oprm.tau = Eigen::Map<const Eigen::Vector2d>(odom_tau.data());
   }
   node.get_parameter("gate_odom", oprm.gate);
   node.get_parameter("odom_timeout_init", oprm.timeout_init);
@@ -205,8 +209,10 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
   if (cfg.use_odom) {
     const OdomModel::Params & oprm = cfg.odom;
     RCLCPP_INFO(
-      logger, "ekf R_odom: [%g, %g] (source: %s), gate_odom: %lf, odom_timeout_init: %lf",
-      oprm.r(0), oprm.r(1), cfg.odom_covariance_source.c_str(), oprm.gate, oprm.timeout_init);
+      logger, "ekf R_odom: [%g, %g], odom_noise_alpha: [%g, %g, %g, %g], accel_noise_tau: [%g, %g], "
+      "gate_odom: %lf, odom_timeout_init: %lf",
+      oprm.r(0), oprm.r(1), oprm.alpha(0), oprm.alpha(1), oprm.alpha(2), oprm.alpha(3),
+      oprm.tau(0), oprm.tau(1), oprm.gate, oprm.timeout_init);
     RCLCPP_INFO(logger, "ekf odom_delay: %lf s", cfg.odom_delay);
   }
 }
@@ -219,6 +225,7 @@ EkfFilter createFilter(const EkfConfig & cfg, const Eigen::Affine3d & mount)
   f.ndt = std::make_shared<NdtModel>(cfg.ndt, mount, core);
   if (cfg.use_odom) {
     f.odom = std::make_shared<OdomModel>(cfg.odom, core);
+    f.odom_noise = std::make_shared<OdomNoise>(cfg.odom);
   }
   f.lagged = std::make_unique<LaggedEkf>(core, cfg.history_length);
   return f;

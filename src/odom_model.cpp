@@ -54,4 +54,25 @@ std::vector<StageResult> OdomModel::update(EkfCore & core, const Measurement & m
   return {res};
 }
 
+OdomNoise::OdomNoise(const OdomModel::Params & p)
+: prm_(p)
+{
+}
+
+Eigen::Vector2d OdomNoise::update(double stamp, double v, double omega)
+{
+  const Eigen::Vector2d now(v, omega);
+  if (has_prev_ && stamp > prev_stamp_) {
+    accel_ = (now - prev_) / (stamp - prev_stamp_);
+  }
+  has_prev_ = true;
+  prev_stamp_ = stamp;
+  prev_ = now;
+
+  const Eigen::Vector4d & a = prm_.alpha;
+  return Eigen::Vector2d(
+    prm_.r(0) + a(0) * v * v + a(1) * omega * omega + std::pow(prm_.tau(0) * accel_(0), 2),
+    prm_.r(1) + a(2) * v * v + a(3) * omega * omega + std::pow(prm_.tau(1) * accel_(1), 2));
+}
+
 }  // namespace ekf_localizer

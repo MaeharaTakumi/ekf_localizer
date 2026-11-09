@@ -22,6 +22,7 @@ using ekf_localizer::EkfCore;
 using ekf_localizer::NdtModel;
 using ekf_localizer::normalizeAngle;
 using ekf_localizer::OdomModel;
+using ekf_localizer::OdomNoise;
 using ekf_localizer::Outcome;
 using VS = EkfCore::StateVector;
 using MS = EkfCore::StateMatrix;
@@ -60,6 +61,7 @@ struct TestParams
 TestParams P0()
 {
   TestParams p;
+  p.odom.r = Eigen::Vector2d(2.5e-3, 5.0e-3);  // シミュレーションのオドメトリのノイズ（σ 0.05 / 0.07）に合わせる
   p.o_x = -0.2; p.o_y = 0.05; p.o_z = 1.2; p.yaw_o = -0.034; p.roll_o = 0.01; p.pitch_o = 0.02;
   // v_z, omega_roll, omega_pitch は Q・P_init とも 0（0 のまま動かない。ekf.yaml の既定と同じ）
   p.core.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.0, 0.0, 0.0, 0.1;
@@ -866,4 +868,47 @@ TEST(OdomModel, InitializesVelocityFromRecentOdom)
   recent.addOdom(0.5, -0.1, r, 105.0);
   EXPECT_TRUE(recent.addNdt(lidarObs(p, 0, 0, 0), 105.05).aided);
   EXPECT_DOUBLE_EQ(recent.core.velocity(), 0.5);
+}
+
+// ---- OdomNoise（オドメトリの観測ノイズの計算）----
+
+TEST(OdomNoise, FixedWhenAlphaAndTauAreZero)
+{
+  OdomModel::Params p;
+  p.r = Eigen::Vector2d(6.08e-3, 9.92e-4);
+  OdomNoise noise(p);
+  EXPECT_TRUE(noise.update(1.0, 0.5, 0.2).isApprox(p.r));
+  EXPECT_TRUE(noise.update(1.02, 1.5, -1.0).isApprox(p.r));
+}
+
+TEST(OdomNoise, SpeedTerms)
+{
+  OdomModel::Params p;
+  p.r = Eigen::Vector2d(1.0e-3, 2.0e-3);
+  p.alpha = Eigen::Vector4d(0.1, 0.2, 0.3, 0.4);
+  OdomNoise noise(p);
+  const Eigen::Vector2d r = noise.update(1.0, 2.0, 3.0);
+  EXPECT_NEAR(r(0), 1.0e-3 + 0.1 * 4.0 + 0.2 * 9.0, 1e-12);
+  EXPECT_NEAR(r(1), 2.0e-3 + 0.3 * 4.0 + 0.4 * 9.0, 1e-12);
+}
+
+TEST(OdomNoise, AccelTermsFromPreviousMessage)
+{
+  OdomModel::Params p;
+  p.r = Eigen::Vector2d(1.0e-3, 2.0e-3);
+  p.tau = Eigen::Vector2d(0.5, 0.25);
+  OdomNoise noise(p);
+
+  // 最初のメッセージは加速度が分からないので 0
+  EXPECT_TRUE(noise.update(1.0, 1.0, 0.0).isApprox(p.r));
+
+  // dv/dt = 2, domega/dt = -4
+  Eigen::Vector2d r = noise.update(1.5, 2.0, -2.0);
+  EXPECT_NEAR(r(0), 1.0e-3 + std::pow(0.5 * 2.0, 2), 1e-12);
+  EXPECT_NEAR(r(1), 2.0e-3 + std::pow(0.25 * 4.0, 2), 1e-12);
+
+  // stamp が進まなければ加速度は前の値のまま
+  r = noise.update(1.5, 9.0, 9.0);
+  EXPECT_NEAR(r(0), 1.0e-3 + std::pow(0.5 * 2.0, 2), 1e-12);
+  EXPECT_NEAR(r(1), 2.0e-3 + std::pow(0.25 * 4.0, 2), 1e-12);
 }

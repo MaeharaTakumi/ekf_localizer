@@ -153,22 +153,12 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
 {
   if (!filter_.lagged || !filter_.odom) {return;}
 
-  Eigen::Vector2d r = cfg_.odom.r;
-  if (cfg_.odom_covariance_source == "message") {
-    // twist.covariance は 6x6 行優先。[0] が v_x、[35] が omega_z の分散
-    const Eigen::Vector2d r_msg(msg->twist.covariance[0], msg->twist.covariance[35]);
-    if (r_msg.allFinite() && (r_msg.array() > 0.0).all()) {
-      r = r_msg;
-    } else {
-      RCLCPP_WARN_ONCE(
-        get_logger(), "Odometry twist covariance is not positive ([0]=%g, [35]=%g). Using R_odom.",
-        r_msg(0), r_msg(1));
-    }
-  }
-
   // twist は child_frame_id（base）座標なので linear.x, angular.z を v_xy, omega_yaw の観測にする
   const double v = msg->twist.twist.linear.x;
   const double omega = msg->twist.twist.angular.z;
+  // 観測ノイズは R_odom と速さ・加速度から計算する（メッセージの共分散は使わない）
+  const Eigen::Vector2d r = filter_.odom_noise->update(
+    rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds(), v, omega);
   // twist が表す動きは stamp より odom_delay だけ前のもの（diff_drive_controller の移動平均など）
   const double stamp = measurementTime(msg->header.stamp, cfg_.odom_delay);
   addMeasurement(filter_.odom->measurement(v, omega, r, stamp));
