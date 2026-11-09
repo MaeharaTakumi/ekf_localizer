@@ -24,7 +24,6 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 | 出力 | `ekf_pose` | geometry_msgs/PoseWithCovarianceStamped | map → LiDAR（共分散は観測モデルで伝播） |
 | 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v_xy（`twist.linear.x`）, omega_yaw（`twist.angular.z`）。v_z・omega_roll・omega_pitch は地図の z とオイラー角の変化率で、base 座標の twist と合わないので出さない |
 | 出力 | TF | | `map_frame_id` → `base_frame_id`（常に配信）。`predict_rate` の周期で、最新の状態を現在時刻まで予測した値。NDT の初期値と MATLAB はこの TF を点群の stamp の時刻で引く（tf2 が前後の値を補間する）。MATLAB は最新の値を今の姿勢にも使う。`tf_future_steps` が 1 以上なら、周期の刻みの stamp で今より先の刻みも送る（下記） |
-| 入力 | `velodyne_points`（`points_topic`） | sensor_msgs/PointCloud2 | `time_source: receipt` のときだけ購読し、受信した時刻を NDT の観測の時刻にする |
 
 購読するトピック名はパラメータで変えられます（リマップでも変えられます）。
 
@@ -37,7 +36,6 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 | 名前 | 値 | 説明 |
 |---|---|---|
 | `use_odom` | true | オドメトリを観測に使うか。false なら NDT だけ（v, omega も NDT の姿勢の変化から推定）。コードの既定は false |
-| `time_source` | `stamp` | 観測の時刻。`stamp`：メッセージの stamp（遅れて届いた NDT は巻き戻して入れ直す）/ `receipt`：受信した時刻。オドメトリはこのノードが受信した時刻、NDT はその点群（`points_topic`）を受信した時刻（NDT のノードに入っていたころの `time_source: wall` と同じ。NDT は計算の分遅れて届くので、点群の時刻まで巻き戻して入れる） |
 | `predict_rate` | 50.0 | 最新の状態を現在時刻まで予測して TF・`ekf_pose`・`ekf_odom` を配信する周期 [Hz]。オドメトリと同じ 50 Hz にしている（点群は stamp から約 15 ms 後に届くので、NDT・MATLAB が点群の stamp より後の TF を待つのは最大 5 ms ほど。Gazebo の `/clock` は 10 ms 刻みなので 100 Hz より速くしても出る数は増えない） |
 | `tf_future_steps` | 0 | TF を `predict_rate` の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。0 なら今の時刻の 1 個だけ（刻みにしない）。下記 |
 | `tf_past_steps` | 0 | `tf_future_steps` が 1 以上のとき、今以前の刻みを何個送り直すか。0 なら送らない。`history_length` より短くする |
@@ -100,7 +98,7 @@ NDT の更新も過去の刻みに入り、点群の stamp で引く値が、引
 | `odom_covariance_source` | `param` | 観測ノイズの出どころ。`param`：`R_odom` / `message`：`twist.covariance[0]`・`[35]`（正でなければ `R_odom`） |
 | `gate_odom` | 1.0e5 | オドメトリのゲート（1.0e5 は実質無効。χ²(2) の 99% は 9.21 で、コードの既定） |
 | `odom_timeout_init` | 0.2 | 初期化のとき、この時間以内のオドメトリがあれば v, omega をその値から始める [s] |
-| `odom_delay` | 0.0 | オドメトリの遅れ [s]。stamp（`time_source: receipt` なら受信した時刻）から引いて補う。`[0, history_length)` の範囲 |
+| `odom_delay` | 0.0 | オドメトリの遅れ [s]。stamp から引いて補う。`[0, history_length)` の範囲 |
 
 ## テスト
 

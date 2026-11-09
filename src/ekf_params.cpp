@@ -15,8 +15,6 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("ndt_pose_topic", "ndt_pose");
   node.declare_parameter("odom_topic", "odom");
   node.declare_parameter("initialpose_topic", "initialpose");
-  node.declare_parameter("time_source", "stamp");
-  node.declare_parameter("points_topic", "velodyne_points");
   node.declare_parameter("predict_rate", 50.0);
   node.declare_parameter("tf_future_steps", 0);
   node.declare_parameter("tf_past_steps", 0);
@@ -77,8 +75,6 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   node.get_parameter("ndt_pose_topic", cfg.ndt_pose_topic);
   node.get_parameter("odom_topic", cfg.odom_topic);
   node.get_parameter("initialpose_topic", cfg.initialpose_topic);
-  choose("time_source", cfg.time_source, {"stamp", "receipt"});
-  node.get_parameter("points_topic", cfg.points_topic);
   node.get_parameter("predict_rate", cfg.predict_rate);
   if (!(cfg.predict_rate > 0.0)) {
     RCLCPP_WARN(logger, "predict_rate must be positive (got %lf). Using 50.0.", cfg.predict_rate);
@@ -186,10 +182,6 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
   }
   RCLCPP_INFO(
     logger, "ekf gate_ndt: %lf (NDT observed as the base pose, 6 components at once)", nprm.gate);
-  RCLCPP_INFO(
-    logger, "ekf time_source: %s%s", cfg.time_source.c_str(),
-    cfg.time_source == "receipt" ?
-    " (odometry: receipt time, NDT: receipt time of its point cloud on points_topic)" : "");
   RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", cprm.max_predict_dt);
   RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", cfg.ndt_delay);
   const auto join = [](const EkfCore::StateVector & v) {

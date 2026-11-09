@@ -332,8 +332,8 @@ NDT の初期値と MATLAB の点群の座標変換は、この `/tf` を点群�
 （2026-10-26 まであった `publish_trigger` の `cloud`（点群が届くたびに、その stamp の時刻の予測値）・`update`（更新するたびに、
 その時刻の事後推定値）と、MATLAB 用の `base_pose`・`vlp16_pose`・`vlp16_points`、NDT で更新した直後の値を出す `tf_ndt_update` はやめた。）
 
-観測の時刻は `time_source` で選びます（`stamp`：メッセージの stamp、`receipt`：受信した時刻。オドメトリはこのノードが受信した時刻、
-NDT はその点群を受信した時刻（NDT のノードに入っていたころと同じ。点群を受け取って stamp ごとに覚えておく））。
+観測の時刻はメッセージの stamp です。受信した時刻を使うとき（環境ファイルの `stamp_mode` が `receipt`・`auto`）は、NDT が `/ndt_pose` の、
+`odom_covariance` が `/localization/odom` の stamp に受信した時刻を入れます（点群のトピック自体の stamp は変えません）。
 
 流れ：
 

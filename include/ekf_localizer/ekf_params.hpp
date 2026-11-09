@@ -25,11 +25,6 @@ struct EkfConfig
   std::string ndt_pose_topic{"ndt_pose"};
   std::string odom_topic{"odom"};
   std::string initialpose_topic{"initialpose"};
-  /// 観測の時刻："stamp"（メッセージの stamp。遅れて届いた観測は巻き戻して入れ直す）or
-  /// "receipt"（このノードが受信した時刻。届いた順に処理され、巻き戻しは起きない）
-  std::string time_source{"stamp"};
-  /// time_source: "receipt" で購読する点群（NDT の観測の時刻に、その点群を受信した時刻を使う）
-  std::string points_topic{"velodyne_points"};
   /// 最新の状態を現在時刻まで予測して TF・ekf_pose・ekf_odom を配信する周期 [Hz]
   double predict_rate{50.0};
   /// TF を predict_rate の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。

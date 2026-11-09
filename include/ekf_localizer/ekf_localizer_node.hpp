@@ -7,7 +7,6 @@
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_broadcaster.h"
 #include "tf2_ros/transform_listener.h"
@@ -27,10 +26,9 @@ namespace ekf_localizer
 ///         tf_future_steps >= 1 なら TF は周期の刻みの stamp で、今より先の刻みも送る（購読側が点群の stamp の
 ///         TF を待たずに引けるように。同じ刻みは周期ごとに送り直して置き換える）
 ///
-///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻は time_source で選ぶ。
-///     stamp    メッセージの stamp。NDT は遅れて届くので、点群の取得時刻まで巻き戻してそれ以降のオドメトリを適用し直す
-///     receipt  受信した時刻。オドメトリはこのノードが受信した時刻、NDT はその点群（points_topic）を受信した時刻
-///              （NDT のノードに入っていたころと同じ。NDT は計算の分だけ遅れて届くので、点群の時刻まで巻き戻して入れる）
+///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻はメッセージの stamp。
+///   NDT は遅れて届くので、その stamp まで巻き戻してそれ以降のオドメトリを適用し直す。
+///   受信した時刻を使うときは、前段（NDT の scan_time_source、odom_covariance の stamp_mode）が stamp に入れる。
 ///   取付 base → LiDAR は TF（静的）から読む。読めるまでは観測を捨てる。
 class EkfLocalizer : public rclcpp::Node
 {
@@ -41,14 +39,11 @@ private:
   void ndtPoseReceived(const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg);
   void odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
   void initialPoseReceived(const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr msg);
-  void cloudReceived(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
   void timerCallback();
   /// 取付 base → LiDAR を TF から読んで EKF を作る（タイマーから呼ぶ）。作れたら true
   bool tryCreateFilter();
-  /// オドメトリの観測の時刻 [s]（time_source に従う。delay を引く）
+  /// 観測の時刻 [s]（メッセージの stamp − delay）
   double measurementTime(const builtin_interfaces::msg::Time & stamp, double delay);
-  /// NDT の観測の時刻 [s]。receipt では、同じ stamp の点群を受信した時刻（無ければ NDT を受信した時刻）
-  double ndtTime(const builtin_interfaces::msg::Time & stamp);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
   /// ekf の推定値を stamp の時刻として ekf_pose・ekf_odom に配信する（TF は timerCallback が送る）
@@ -73,8 +68,6 @@ private:
   rclcpp::Time last_publish_stamp_;
   /// タイマーの周期と TF の刻みの幅 [ns]（1 / predict_rate）
   int64_t period_ns_{20000000};
-  /// time_source: receipt で、点群の stamp [ns] → 受信した時刻 [s]（history_length より古いものは捨てる）
-  std::map<int64_t, double> cloud_receipt_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -83,7 +76,6 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr ndt_pose_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr ekf_pose_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ekf_odom_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

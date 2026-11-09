@@ -2,11 +2,6 @@
 /**:
     ros__parameters:
       use_odom: true
-      # 観測の時刻："stamp"（メッセージの stamp。遅れて届いた NDT は巻き戻して入れ直す）、
-      #   "receipt"（受信した時刻。オドメトリはこのノードが受信した時刻、NDT はその点群を受信した時刻。
-      #    NDT のノードに入っていたころの time_source: wall と同じ。NDT は計算の分遅れて届くので巻き戻して入れる）
-      time_source: "stamp"
-      points_topic: "velodyne_points"   # time_source: receipt のときだけ購読する
       # TF map → base・ekf_pose・ekf_odom を、最新の状態を現在時刻まで予測して出す周期 [Hz]。NDT の初期値と MATLAB は
       # この TF を点群の stamp で引く（補間）。オドメトリと同じ 50 Hz（点群は stamp から約 15 ms で届くので、待っても 5 ms ほど）
       predict_rate: 50.0
