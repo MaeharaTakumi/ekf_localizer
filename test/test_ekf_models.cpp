@@ -63,7 +63,7 @@ TestParams P0()
   TestParams p;
   p.odom.r = Eigen::Vector2d(2.5e-3, 5.0e-3);  // シミュレーションのオドメトリのノイズ（σ 0.05 / 0.07）に合わせる
   p.o_x = -0.2; p.o_y = 0.05; p.o_z = 1.2; p.yaw_o = -0.034; p.roll_o = 0.01; p.pitch_o = 0.02;
-  // v_z, omega_roll, omega_pitch は Q・P_init とも 0（0 のまま動かない。ekf.yaml の既定と同じ）
+  // v_z, omega_roll, omega_pitch は Q・P_init とも 0（0 のまま動かない）
   p.core.q << 3e-2, 3e-2, 3e-2, 5e-2, 5e-2, 5e-2, 0.05, 0.0, 0.0, 0.0, 0.1;
   p.ndt.r << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 5e-3;
   p.core.p_init << 2 * p.ndt.r, 1.0, 0.0, 0.0, 0.0, 1.0;

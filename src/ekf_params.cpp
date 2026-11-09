@@ -24,13 +24,13 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("lidar_frame_id", "velodyne");
   node.declare_parameter(
     "Q", std::vector<double>{
-      1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3, 0.05, 0.0, 0.0, 0.0, 0.2});
+      5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 0.0, 0.1, 0.1, 10.0});
   node.declare_parameter(
-    "R_ndt", std::vector<double>{1.0e-4, 1.0e-4, 1.0e-4, 1.0e-6, 1.0e-6, 1.0e-6});
+    "R_ndt", std::vector<double>{2.08e-4, 1.55e-4, 9.61e-5, 5.89e-5, 6.32e-5, 1.23e-5});
   node.declare_parameter("max_predict_dt", 0.2);
   node.declare_parameter(
     "P_init", std::vector<double>{
-      2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6, 1.0, 0.0, 0.0, 0.0, 1.0});
+      2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.0, 0.01, 0.01, 0.01});
   node.declare_parameter("gate_ndt", 16.81);
   node.declare_parameter("ndt_delay", 0.0);
 

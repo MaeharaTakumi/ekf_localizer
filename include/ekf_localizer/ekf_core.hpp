@@ -57,12 +57,10 @@ public:
     /// [v_xy, v_z, omega_roll, omega_pitch, omega_yaw] [m^2/s^3], [rad^2/s^3]。
     /// v_z, omega_roll, omega_pitch の Q と p_init が 0 なら、その 3 つは 0 のまま動かない（z, roll, pitch は Q のノイズだけ）
     StateVector q =
-      (StateVector() << 1.0e-3, 1.0e-3, 2.0e-3, 5.0e-3, 5.0e-3, 1.0e-3,
-      0.05, 0.0, 0.0, 0.0, 0.2).finished();
+      (StateVector() << 5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 0.0, 0.1, 0.1, 10.0).finished();
     /// 初期共分散の対角（分散、状態と同じ並び）
     StateVector p_init =
-      (StateVector() << 2.0e-4, 2.0e-4, 2.0e-4, 2.0e-6, 2.0e-6, 2.0e-6,
-      1.0, 0.0, 0.0, 0.0, 1.0).finished();
+      (StateVector() << 2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.0, 0.01, 0.01, 0.01).finished();
     /// 1 回の予測で進める dt の上限 [s]
     double max_predict_dt{0.2};
   };

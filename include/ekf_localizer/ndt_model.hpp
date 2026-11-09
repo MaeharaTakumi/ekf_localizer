@@ -32,7 +32,7 @@ public:
   struct Params
   {
     /// 観測ノイズ（LiDAR の [x, y, z, roll, pitch, yaw]）[m^2], [rad^2]
-    Vector6d r = (Vector6d() << 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-6, 1.0e-6, 1.0e-6).finished();
+    Vector6d r = (Vector6d() << 2.08e-4, 1.55e-4, 9.61e-5, 5.89e-5, 6.32e-5, 1.23e-5).finished();
     /// 6 成分のゲート（既定 chi2(6, 0.99)）
     double gate{16.81};
   };
