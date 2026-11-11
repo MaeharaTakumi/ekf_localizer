@@ -16,15 +16,11 @@
 namespace ekf_localizer
 {
 
-/// EKF ノードのパラメータ一式（param/ekf.yaml）
+/// EKF ノードのパラメータ一式（既定値はここと declareEkfParameters。設定ファイルは localization_bringup の param/<env>/ekf_localizer.yaml）
 struct EkfConfig
 {
   /// オドメトリを観測に使うか
-  bool use_odom{false};
-  /// 購読するトピック
-  std::string ndt_pose_topic{"ndt_pose"};
-  std::string odom_topic{"odom"};
-  std::string initialpose_topic{"initialpose"};
+  bool use_odom{true};
   /// 最新の状態を現在時刻まで予測して TF・ekf_pose・ekf_odom を配信する周期 [Hz]
   double predict_rate{50.0};
   /// TF を predict_rate の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。
@@ -42,6 +38,12 @@ struct EkfConfig
   double ndt_delay{0.0};
   /// オドメトリの遅れ [s]。twist が実際の動きより遅れる分（移動平均など）を、stamp から引いて補う
   double odom_delay{0.0};
+  /// オドメトリの v, omega に掛ける倍率 [v, omega]（実効的な車輪間隔・半径が設定と違う分の補正）
+  Eigen::Vector2d odom_scale{1.0, 1.0};
+  /// オドメトリの観測の時刻の決め方："stamp"（メッセージの stamp）、"receipt"（このノードが受け取った時刻）、
+  /// "auto"（|受け取った時刻 − stamp| が odom_stamp_auto_threshold 以上なら受け取った時刻、小さければ stamp）
+  std::string odom_stamp_mode{"stamp"};
+  double odom_stamp_auto_threshold{0.1};
 
   EkfCore::Params core;
   /// 取付 base → LiDAR は TF から読んで createFilter() で入れる

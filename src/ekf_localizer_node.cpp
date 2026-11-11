@@ -42,15 +42,15 @@ EkfLocalizer::EkfLocalizer(const rclcpp::NodeOptions & options)
 
   // NDT の解は 1 つも落としたくないので reliable
   ndt_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-    cfg_.ndt_pose_topic, rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
+    "ndt_pose", rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
     std::bind(&EkfLocalizer::ndtPoseReceived, this, std::placeholders::_1));
   // best effort は reliable / best effort どちらの publisher とも接続できる（Real と Gazebo で共通）。
   // 深さは処理が詰まったときに捨てない程度
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-    cfg_.odom_topic, rclcpp::QoS(rclcpp::KeepLast(50)).best_effort(),
+    "odom", rclcpp::QoS(rclcpp::KeepLast(50)).best_effort(),
     std::bind(&EkfLocalizer::odomReceived, this, std::placeholders::_1));
   initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-    cfg_.initialpose_topic, rclcpp::SystemDefaultsQoS(),
+    "initialpose", rclcpp::SystemDefaultsQoS(),
     std::bind(&EkfLocalizer::initialPoseReceived, this, std::placeholders::_1));
 
   // /ekf_pose は map → LiDAR。後から購読したノードも最後の値を受け取れるよう transient_local
@@ -91,6 +91,26 @@ bool EkfLocalizer::tryCreateFilter()
 double EkfLocalizer::measurementTime(const builtin_interfaces::msg::Time & stamp, double delay)
 {
   return rclcpp::Time(stamp, RCL_ROS_TIME).seconds() - delay;
+}
+
+builtin_interfaces::msg::Time EkfLocalizer::odomStamp(const builtin_interfaces::msg::Time & stamp)
+{
+  if (cfg_.odom_stamp_mode == "stamp") {return stamp;}
+  const rclcpp::Time t_receipt = now();
+  if (t_receipt.nanoseconds() == 0) {return stamp;}   // sim time で /clock をまだ受け取っていない
+  const double offset = t_receipt.seconds() - rclcpp::Time(stamp, RCL_ROS_TIME).seconds();
+  const bool use_receipt = cfg_.odom_stamp_mode == "receipt" ||
+    std::abs(offset) >= cfg_.odom_stamp_auto_threshold;
+  if (cfg_.odom_stamp_mode == "auto") {
+    ++odom_count_;
+    odom_receipt_count_ += use_receipt ? 1 : 0;
+    odom_max_abs_offset_ = std::max(odom_max_abs_offset_, std::abs(offset));
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 10000,
+      "auto: receipt time used for %d of %d odometry messages (|receipt - stamp| latest %.1f ms, max %.1f ms)",
+      odom_receipt_count_, odom_count_, offset * 1e3, odom_max_abs_offset_ * 1e3);
+  }
+  return use_receipt ? static_cast<builtin_interfaces::msg::Time>(t_receipt) : stamp;
 }
 
 void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
@@ -153,14 +173,15 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
 {
   if (!filter_.lagged || !filter_.odom) {return;}
 
-  // twist は child_frame_id（base）座標なので linear.x, angular.z を v_xy, omega_yaw の観測にする
-  const double v = msg->twist.twist.linear.x;
-  const double omega = msg->twist.twist.angular.z;
+  // twist は child_frame_id（base）座標なので linear.x, angular.z を v_xy, omega_yaw の観測にする（倍率 odom_scale を掛ける）
+  const double v = msg->twist.twist.linear.x * cfg_.odom_scale(0);
+  const double omega = msg->twist.twist.angular.z * cfg_.odom_scale(1);
+  // 時刻は odom_stamp_mode で stamp か受け取った時刻
+  const builtin_interfaces::msg::Time msg_stamp = odomStamp(msg->header.stamp);
   // 観測ノイズは R_odom と速さ・加速度から計算する（メッセージの共分散は使わない）
-  const Eigen::Vector2d r = filter_.odom_noise->update(
-    rclcpp::Time(msg->header.stamp, RCL_ROS_TIME).seconds(), v, omega);
+  const Eigen::Vector2d r = filter_.odom_noise->update(rclcpp::Time(msg_stamp, RCL_ROS_TIME).seconds(), v, omega);
   // twist が表す動きは stamp より odom_delay だけ前のもの（diff_drive_controller の移動平均など）
-  const double stamp = measurementTime(msg->header.stamp, cfg_.odom_delay);
+  const double stamp = measurementTime(msg_stamp, cfg_.odom_delay);
   addMeasurement(filter_.odom->measurement(v, omega, r, stamp));
 }
 

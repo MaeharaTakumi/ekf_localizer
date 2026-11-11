@@ -6,7 +6,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 - 状態：`[x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw]`（`base_frame_id` の姿勢と、水平面の前向きの速さ・
   地図の z の速度・roll, pitch, yaw の変化率）。運動は各軸が独立（[docs/ekf_flow.md](docs/ekf_flow.md) の「運動モデル」）。
   `v_z`・`omega_roll`・`omega_pitch` は `Q`・`P_init` を 0 にすると 0 のまま動かず、足す前の 8 状態と同じになる（Gazebo の環境ファイル `gazebo.yaml` は 3 つとも 0。
-  `ekf.yaml` の既定は 2026-11-09 から実機 blue の値で、`omega_roll`・`omega_pitch` の `Q` 0.1・`v_z` 0）
+  コードの既定は 2026-11-09 から実機 blue の値で、`omega_roll`・`omega_pitch` の `Q` 0.1・`v_z` 0）
 - 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v_xy, omega_yaw]`（`use_odom: true`）
 - **観測の遅れ**：NDT は `ndt_delay`、オドメトリは `odom_delay` 秒だけ stamp を戻して入れます
   （既定はどちらも 0。Gazebo の diff_drive_controller が twist を 0.2 s の移動平均で出していたころは `odom_delay` 0.09 s。
@@ -19,9 +19,9 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 
 | 種類 | トピック（既定） | 型 | 内容 |
 |---|---|---|---|
-| 入力 | `ndt_pose`（`ndt_pose_topic`） | geometry_msgs/PoseWithCovarianceStamped | NDT の解（map → LiDAR、stamp は点群の取得時刻。`frame_id` は見ない） |
-| 入力 | `odom`（`odom_topic`） | nav_msgs/Odometry | `twist.linear.x`, `twist.angular.z` を v_xy, omega_yaw の観測に使う |
-| 入力 | `initialpose`（`initialpose_topic`） | geometry_msgs/PoseWithCovarianceStamped | 受け取ると EKF をリセットし、次の NDT で初期化し直す |
+| 入力 | `ndt_pose` | geometry_msgs/PoseWithCovarianceStamped | NDT の解（map → LiDAR、stamp は点群の取得時刻。`frame_id` は見ない） |
+| 入力 | `odom` | nav_msgs/Odometry | `twist.linear.x`, `twist.angular.z` に `odom_scale` を掛けて v_xy, omega_yaw の観測に使う |
+| 入力 | `initialpose` | geometry_msgs/PoseWithCovarianceStamped | 受け取ると EKF をリセットし、次の NDT で初期化し直す |
 | 出力 | `ekf_pose` | geometry_msgs/PoseWithCovarianceStamped | map → LiDAR（共分散は観測モデルで伝播） |
 | 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v_xy（`twist.linear.x`）, omega_yaw（`twist.angular.z`）。v_z・omega_roll・omega_pitch は地図の z とオイラー角の変化率で、base 座標の twist と合わないので出さない |
 | 出力 | TF | | `map_frame_id` → `base_frame_id`（常に配信）。`predict_rate` の周期で、最新の状態を現在時刻まで予測した値。NDT の初期値と MATLAB はこの TF を点群の stamp の時刻で引く（tf2 が前後の値を補間する）。MATLAB は最新の値を今の姿勢にも使う。`tf_future_steps` が 1 以上なら、周期の刻みの stamp で今より先の刻みも送る（下記） |
@@ -30,13 +30,16 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 
 ## パラメータ
 
-値は [param/ekf.yaml](param/ekf.yaml) のもの。
+値はコードの既定値（`src/ekf_params.cpp` の `declareEkfParameters`）。このパッケージにはパラメータファイルを置かない
+（2026-11-11 に `param/ekf.yaml` をやめた）。環境ごとの値は [localization_bringup](https://github.com/MaeharaTakumi/localization_bringup) の
+`param/<env>/ekf_localizer.yaml` に書き、書いていない項目はこの既定値になる。トピック名を変えるときは remap する
+（2026-11-11 に `ndt_pose_topic`・`odom_topic`・`initialpose_topic` をやめた。localization_bringup の launch は `odom` を `/wheelchair/odom` にする）。
 
 ### 全体
 
 | 名前 | 値 | 説明 |
 |---|---|---|
-| `use_odom` | true | オドメトリを観測に使うか。false なら NDT だけ（v, omega も NDT の姿勢の変化から推定）。コードの既定は false |
+| `use_odom` | true | オドメトリを観測に使うか。false なら NDT だけ（v, omega も NDT の姿勢の変化から推定） |
 | `predict_rate` | 50.0 | 最新の状態を現在時刻まで予測して TF・`ekf_pose`・`ekf_odom` を配信する周期 [Hz]。オドメトリと同じ 50 Hz にしている（点群は stamp から約 15 ms 後に届くので、NDT・MATLAB が点群の stamp より後の TF を待つのは最大 5 ms ほど。Gazebo の `/clock` は 10 ms 刻みなので 100 Hz より速くしても出る数は増えない） |
 | `tf_future_steps` | 0 | TF を `predict_rate` の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。0 なら今の時刻の 1 個だけ（刻みにしない）。下記 |
 | `tf_past_steps` | 0 | `tf_future_steps` が 1 以上のとき、今以前の刻みを何個送り直すか。0 なら送らない。`history_length` より短くする |
@@ -69,9 +72,6 @@ NDT の更新も過去の刻みに入り、点群の stamp で引く値が、引
 
 | 名前 | 値 | 説明 |
 |---|---|---|
-| `ndt_pose_topic` | `ndt_pose` | NDT の解のトピック |
-| `odom_topic` | `odom` | オドメトリのトピック |
-| `initialpose_topic` | `initialpose` | 初期姿勢（リセット）のトピック |
 | `map_frame_id` | `map` | 地図のフレーム。出力（TF・`ekf_pose`・`ekf_odom`）の `frame_id`。`ndt_pose` はこのフレームの値として扱う |
 | `base_frame_id` | `base_link` | 状態と TF の基準のフレーム |
 | `lidar_frame_id` | `velodyne` | 点群のフレーム（NDT が推定する姿勢のフレーム）。取付 `base → LiDAR` を TF から読む |
@@ -90,7 +90,7 @@ NDT の更新も過去の刻みに入り、点群の stamp で引く値が、引
 | 名前 | 値 | 説明 |
 |---|---|---|
 | `ndt_delay` | 0.0 | NDT の遅れ [s]。点群の取得時刻が stamp より前の分を、stamp から引いて補う。`[0, history_length)` の範囲 |
-| `gate_ndt` | 1.0e5 | NDT のゲート（マハラノビス距離の 2 乗の上限。1.0e5 は実質無効。χ²(6) の 99% は 16.81 で、コードの既定）。NDT の解は base の姿勢に直して 6 成分を 1 回で更新するので、ゲートを効かせると、どれか 1 成分が大きくずれても観測全体を使わない |
+| `gate_ndt` | 1.0e5 | NDT のゲート（マハラノビス距離の 2 乗の上限。1.0e5 は実質無効。χ²(6) の 99% は 16.81。`NdtModel::Params` の既定は 16.81 で、テストで使う）。NDT の解は base の姿勢に直して 6 成分を 1 回で更新するので、ゲートを効かせると、どれか 1 成分が大きくずれても観測全体を使わない |
 
 ### オドメトリ（`use_odom: true` のみ）
 
@@ -98,7 +98,10 @@ NDT の更新も過去の刻みに入り、点群の stamp で引く値が、引
 |---|---|---|
 | `odom_noise_alpha` | [0, 0, 0, 0] | オドメトリの観測ノイズの速さに応じた分の係数 [v²→R_v, ω²→R_v, v²→R_omega, ω²→R_omega]。R_v = R_odom[0] + a[0] v² + a[1] ω² + (τ[0] dv/dt)²、R_omega = R_odom[1] + a[2] v² + a[3] ω² + (τ[1] dω/dt)² |
 | `accel_noise_tau` | [0, 0] | オドメトリの観測ノイズの加速度に応じた分の時定数 [τ_v, τ_omega] [s]。加速度は直前のメッセージとの差 |
-| `gate_odom` | 1.0e5 | オドメトリのゲート（1.0e5 は実質無効。χ²(2) の 99% は 9.21 で、コードの既定） |
+| `gate_odom` | 1.0e5 | オドメトリのゲート（1.0e5 は実質無効。χ²(2) の 99% は 9.21。`OdomModel::Params` の既定は 9.21 で、テストで使う） |
+| `odom_scale` | [1.0, 1.0] | オドメトリの v, omega に掛ける倍率 [v, omega]（実効的な車輪間隔・半径が設定と違う分の補正。Gazebo は [1.0, 0.922]）。観測ノイズはこの倍率を掛けた値から計算する。2026-11-11 に localization_bringup の `odom_relay` から移した |
+| `odom_stamp_mode` | `stamp` | オドメトリの観測の時刻の決め方。`stamp`：メッセージの stamp / `receipt`：このノードが受け取った時刻 / `auto`：\|受け取った時刻 − stamp\| が `odom_stamp_auto_threshold` 以上なら受け取った時刻、小さければ stamp（1 つずつ判断し、10 s ごとに使った数をログに出す）。sim time で `/clock` を受け取る前は stamp。NDT の観測は常に stamp（受信した時刻を使うときは NDT の `stamp_mode` が `/ndt_pose` の stamp に点群の受信時刻を入れる） |
+| `odom_stamp_auto_threshold` | 0.1 | `auto` の閾値 [s] |
 | `odom_timeout_init` | 0.2 | 初期化のとき、この時間以内のオドメトリがあれば v, omega をその値から始める [s] |
 | `odom_delay` | 0.0 | オドメトリの遅れ [s]。stamp から引いて補う。`[0, history_length)` の範囲 |
 

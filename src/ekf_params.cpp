@@ -11,10 +11,7 @@ namespace ekf_localizer
 
 void declareEkfParameters(rclcpp::Node & node)
 {
-  node.declare_parameter("use_odom", false);
-  node.declare_parameter("ndt_pose_topic", "ndt_pose");
-  node.declare_parameter("odom_topic", "odom");
-  node.declare_parameter("initialpose_topic", "initialpose");
+  node.declare_parameter("use_odom", true);
   node.declare_parameter("predict_rate", 50.0);
   node.declare_parameter("tf_future_steps", 0);
   node.declare_parameter("tf_past_steps", 0);
@@ -31,16 +28,20 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter(
     "P_init", std::vector<double>{
       2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.0, 0.01, 0.01, 0.01});
-  node.declare_parameter("gate_ndt", 16.81);
+  // ゲートの既定 1.0e5 は実質無効（χ²(6) の 99% は 16.81。観測モデルの構造体の既定はこちらで、テストで使う）
+  node.declare_parameter("gate_ndt", 1.0e5);
   node.declare_parameter("ndt_delay", 0.0);
 
   // オドメトリ観測（use_odom: true のみ）
   node.declare_parameter("R_odom", std::vector<double>{6.08e-3, 9.92e-4});
   node.declare_parameter("odom_noise_alpha", std::vector<double>{0.0, 0.0, 0.0, 0.0});
   node.declare_parameter("accel_noise_tau", std::vector<double>{0.0, 0.0});
-  node.declare_parameter("gate_odom", 9.21);
+  node.declare_parameter("gate_odom", 1.0e5);   // 実質無効（χ²(2) の 99% は 9.21）
   node.declare_parameter("odom_timeout_init", 0.2);
   node.declare_parameter("odom_delay", 0.0);
+  node.declare_parameter("odom_scale", std::vector<double>{1.0, 1.0});
+  node.declare_parameter("odom_stamp_mode", "stamp");
+  node.declare_parameter("odom_stamp_auto_threshold", 0.1);
 }
 
 EkfConfig loadEkfConfig(rclcpp::Node & node)
@@ -61,9 +62,6 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
     };
 
   node.get_parameter("use_odom", cfg.use_odom);
-  node.get_parameter("ndt_pose_topic", cfg.ndt_pose_topic);
-  node.get_parameter("odom_topic", cfg.odom_topic);
-  node.get_parameter("initialpose_topic", cfg.initialpose_topic);
   node.get_parameter("predict_rate", cfg.predict_rate);
   if (!(cfg.predict_rate > 0.0)) {
     RCLCPP_WARN(logger, "predict_rate must be positive (got %lf). Using 50.0.", cfg.predict_rate);
@@ -106,7 +104,7 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   node.get_parameter("base_frame_id", cfg.base_frame_id);
   node.get_parameter("lidar_frame_id", cfg.lidar_frame_id);
 
-  std::vector<double> q, p_init, r_ndt, r_odom, odom_alpha, odom_tau;
+  std::vector<double> q, p_init, r_ndt, r_odom, odom_alpha, odom_tau, odom_scale;
   // Q と P_init は状態と同じ
   // [x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw] の 11 要素
   if (load("Q", EkfCore::kN, q)) {
@@ -157,6 +155,17 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
       logger, "odom_delay must be in [0, history_length) (got %lf). Using 0.0.", cfg.odom_delay);
     cfg.odom_delay = 0.0;
   }
+  if (load("odom_scale", 2, odom_scale)) {
+    cfg.odom_scale = Eigen::Map<const Eigen::Vector2d>(odom_scale.data());
+  }
+  node.get_parameter("odom_stamp_mode", cfg.odom_stamp_mode);
+  if (cfg.odom_stamp_mode != "stamp" && cfg.odom_stamp_mode != "receipt" && cfg.odom_stamp_mode != "auto") {
+    RCLCPP_WARN(
+      logger, "odom_stamp_mode must be stamp, receipt or auto (got \"%s\"). Using stamp.",
+      cfg.odom_stamp_mode.c_str());
+    cfg.odom_stamp_mode = "stamp";
+  }
+  node.get_parameter("odom_stamp_auto_threshold", cfg.odom_stamp_auto_threshold);
 
   return cfg;
 }
@@ -170,9 +179,6 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     "[x,y,z,roll,pitch,yaw,v_xy,v_z,omega_roll,omega_pitch,omega_yaw]%s",
     cfg.base_frame_id.c_str(),
     cfg.use_odom ? " + odom observation [v_xy,omega_yaw]" : " (odom unused)");
-  RCLCPP_INFO(
-    logger, "ekf topics: ndt_pose: %s, odom: %s, initialpose: %s",
-    cfg.ndt_pose_topic.c_str(), cfg.odom_topic.c_str(), cfg.initialpose_topic.c_str());
   RCLCPP_INFO(
     logger, "ekf frames: %s -> %s (lidar: %s)",
     cfg.map_frame_id.c_str(), cfg.base_frame_id.c_str(), cfg.lidar_frame_id.c_str());
@@ -213,7 +219,10 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
       "gate_odom: %lf, odom_timeout_init: %lf",
       oprm.r(0), oprm.r(1), oprm.alpha(0), oprm.alpha(1), oprm.alpha(2), oprm.alpha(3),
       oprm.tau(0), oprm.tau(1), oprm.gate, oprm.timeout_init);
-    RCLCPP_INFO(logger, "ekf odom_delay: %lf s", cfg.odom_delay);
+    RCLCPP_INFO(
+      logger, "ekf odom_delay: %lf s, odom_scale: [%g, %g], odom_stamp_mode: %s (odom_stamp_auto_threshold %g s)",
+      cfg.odom_delay, cfg.odom_scale(0), cfg.odom_scale(1), cfg.odom_stamp_mode.c_str(),
+      cfg.odom_stamp_auto_threshold);
   }
 }
 

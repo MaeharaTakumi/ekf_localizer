@@ -173,7 +173,7 @@ dyaw/dt   = omega_yaw           pitch += omega_pitch dt
 - v_z・omega_roll・omega_pitch の `Q` と `P_init` が 0 なら、その 3 つと P のその行・列は 0 のままで、z, roll, pitch は予測で動きません
   （`Q` のノイズだけ。足す前の 8 状態と同じ）。Gazebo（`gazebo.yaml`）はこれです。同じ観測の列を入れて 8 状態と比べると、
   状態の差は丸め誤差（1e-17 以下）でした（2026-11-05）。
-- `ekf.yaml` の既定（2026-11-09 から実機 blue の値。red・white・blue で使う）は omega_roll・omega_pitch の `Q` 0.1、v_z は 0（blue の録画で 2026-11-07 に決めた）。実機は傾きが動くので、点群の時刻の予測値（NDT の初期値）と
+- コードの既定（2026-11-09 から実機 blue の値。red・white・blue で使う）は omega_roll・omega_pitch の `Q` 0.1、v_z は 0（blue の録画で 2026-11-07 に決めた）。実機は傾きが動くので、点群の時刻の予測値（NDT の初期値）と
   NDT の解の roll・pitch の差が小さくなる（調整に使っていない録画で −9 %・−5 %）。Gazebo は真の roll・pitch がほとんど動かず、0.1 にすると
   真値との差が 15 % ほど悪くなるので 0。
 - `Q` を正にすると、NDT が途切れても z, roll, pitch は v_z・omega_roll・omega_pitch で外挿されます（坂のテスト `SlopeZFollowsVzDuringNdtOutage`）。
@@ -206,7 +206,7 @@ dyaw/dt   = omega_yaw           pitch += omega_pitch dt
 
 ## 1. 起動
 
-1. パラメータを読む（`param/ekf.yaml`）。
+1. パラメータを読む（コードの既定値に、launch が渡す localization_bringup の `param/<env>/ekf_localizer.yaml` を重ねる）。
 2. タイマーのたびに、TF から取付 T_BL を引く。取れるまでは `Waiting for TF ...` を出して待つ。
 3. 取付が取れたらフィルタを作る（`EkfCore`、`NdtModel`、`use_odom` が true なら `OdomModel`、`LaggedEkf`）。この時点では**未初期化**で、何も配信しない。
 
@@ -332,8 +332,9 @@ NDT の初期値と MATLAB の点群の座標変換は、この `/tf` を点群�
 （2026-10-26 まであった `publish_trigger` の `cloud`（点群が届くたびに、その stamp の時刻の予測値）・`update`（更新するたびに、
 その時刻の事後推定値）と、MATLAB 用の `base_pose`・`vlp16_pose`・`vlp16_points`、NDT で更新した直後の値を出す `tf_ndt_update` はやめた。）
 
-観測の時刻はメッセージの stamp です。受信した時刻を使うとき（環境ファイルの `stamp_mode` が `receipt`・`auto`）は、NDT が `/ndt_pose` の、
-`odom_relay` が `/localization/odom` の stamp に受信した時刻を入れます（点群のトピック自体の stamp は変えません）。
+NDT の観測の時刻はメッセージの stamp です。受信した時刻を使うとき（NDT の `stamp_mode` が `receipt`・`auto`）は、NDT が `/ndt_pose` の
+stamp に点群の受信時刻を入れます（点群のトピック自体の stamp は変えません）。オドメトリの観測の時刻は `odom_stamp_mode` で、stamp か
+このノードが受け取った時刻にします（`/ndt_pose` の受信時刻は NDT の計算の遅れを含むので、NDT には使わない。開発ログ 20）。
 
 流れ：
 

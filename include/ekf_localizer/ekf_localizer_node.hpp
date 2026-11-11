@@ -19,16 +19,17 @@ namespace ekf_localizer
 /// NDT とオドメトリを融合する EKF ノード
 ///
 ///   入力  ndt_pose（map → LiDAR、stamp は点群の取得時刻）、odom（v, omega）、initialpose（リセット）
-///         トピック名は ndt_pose_topic / odom_topic / initialpose_topic で変えられる
+///         トピック名を変えるときは remap する（localization_bringup の launch は odom を /wheelchair/odom にする）
 ///   出力  predict_rate の周期で、最新の状態を現在時刻まで予測した TF map → base、ekf_pose（map → LiDAR）、
 ///         ekf_odom（map → base、v, omega）。NDT は点群の stamp の時刻の TF を初期値にし、MATLAB などは
 ///         最新の TF（今の姿勢）と点群の stamp の時刻の TF（点群の座標変換）を引く。
 ///         tf_future_steps >= 1 なら TF は周期の刻みの stamp で、今より先の刻みも送る（購読側が点群の stamp の
 ///         TF を待たずに引けるように。同じ刻みは周期ごとに送り直して置き換える）
 ///
-///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻はメッセージの stamp。
+///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。
+///   NDT の観測の時刻はメッセージの stamp（受信した時刻を使うときは NDT の stamp_mode が点群の受信時刻を stamp に入れる）。
+///   オドメトリは odom_stamp_mode で stamp か、このノードが受け取った時刻を使い、v, omega に odom_scale を掛ける。
 ///   NDT は遅れて届くので、その stamp まで巻き戻してそれ以降のオドメトリを適用し直す。
-///   受信した時刻を使うときは、前段（NDT と odom_relay の stamp_mode）が stamp に入れる。
 ///   取付 base → LiDAR は TF（静的）から読む。読めるまでは観測を捨てる。
 class EkfLocalizer : public rclcpp::Node
 {
@@ -44,6 +45,8 @@ private:
   bool tryCreateFilter();
   /// 観測の時刻 [s]（メッセージの stamp − delay）
   double measurementTime(const builtin_interfaces::msg::Time & stamp, double delay);
+  /// オドメトリの時刻：odom_stamp_mode で、stamp か、このノードが受け取った時刻（sim time で /clock を受け取る前は stamp）
+  builtin_interfaces::msg::Time odomStamp(const builtin_interfaces::msg::Time & stamp);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
   /// ekf の推定値を stamp の時刻として ekf_pose・ekf_odom に配信する（TF は timerCallback が送る）
@@ -68,6 +71,10 @@ private:
   rclcpp::Time last_publish_stamp_;
   /// タイマーの周期と TF の刻みの幅 [ns]（1 / predict_rate）
   int64_t period_ns_{20000000};
+  /// odom_stamp_mode: auto のログ用：受け取った数、受け取った時刻を使った数、|受け取った時刻 − stamp| の最大 [s]
+  int odom_count_{0};
+  int odom_receipt_count_{0};
+  double odom_max_abs_offset_{0.0};
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

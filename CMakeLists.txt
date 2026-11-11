@@ -57,9 +57,6 @@ ament_target_dependencies(ekf_localizer_node
 install(TARGETS ekf_localizer_node
   DESTINATION lib/${PROJECT_NAME}
 )
-install(DIRECTORY param
-  DESTINATION share/${PROJECT_NAME}
-)
 
 if(BUILD_TESTING)
   # EKF の単体テスト（ROS 非依存）。colcon test --packages-select ekf_localizer
