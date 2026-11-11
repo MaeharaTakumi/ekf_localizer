@@ -28,7 +28,7 @@ namespace ekf_localizer
 ///
 ///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。観測の時刻はメッセージの stamp。
 ///   NDT は遅れて届くので、その stamp まで巻き戻してそれ以降のオドメトリを適用し直す。
-///   受信した時刻を使うときは、前段（NDT の scan_time_source、odom_covariance の stamp_mode）が stamp に入れる。
+///   受信した時刻を使うときは、前段（NDT と odom_relay の stamp_mode）が stamp に入れる。
 ///   取付 base → LiDAR は TF（静的）から読む。読めるまでは観測を捨てる。
 class EkfLocalizer : public rclcpp::Node
 {

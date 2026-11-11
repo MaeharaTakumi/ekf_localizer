@@ -118,8 +118,6 @@ void EkfCore::initialize(const StateVector & x0, double stamp)
 void EkfCore::reset()
 {
   initialized_ = false;
-  last_dt_ = 0.0;
-  last_dt_clamped_ = false;
   std::fill(gates_.begin(), gates_.end(), GateState());
 }
 
@@ -127,15 +125,9 @@ void EkfCore::predictTo(double stamp)
 {
   if (!initialized_) {return;}
 
-  double dt = stamp - t_last_;
-  if (dt <= 0.0) {
-    last_dt_ = 0.0;
-    last_dt_clamped_ = false;
-    return;
-  }
-  last_dt_clamped_ = (dt > prm_.max_predict_dt);
-  if (last_dt_clamped_) {dt = prm_.max_predict_dt;}
-  last_dt_ = dt;
+  // dt が max_predict_dt を超える場合は予測だけ切り詰める（t_last_ は stamp まで進める）
+  const double dt = std::min(stamp - t_last_, prm_.max_predict_dt);
+  if (dt <= 0.0) {return;}
 
   const StateMatrix F = transitionJacobian(x_, dt);
   x_ = propagate(x_, dt);

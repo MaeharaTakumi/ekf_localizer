@@ -116,7 +116,7 @@ void EkfLocalizer::addMeasurement(const MeasurementPtr & m)
     const MeasurementPtr & aid = ekf.initAid();
     RCLCPP_INFO(
       get_logger(), "EKF initialized by %s (v_xy, omega_yaw = %.3f, %.3f from %s).", model.name(),
-      ekf.velocity(), ekf.angularVelocity(), o.aided ? aid->model->name() : "zero");
+      ekf.vXy(), ekf.omegaYaw(), o.aided ? aid->model->name() : "zero");
     return;
   }
 
@@ -263,8 +263,8 @@ void EkfLocalizer::publish(const EkfCore & ekf, const rclcpp::Time & stamp)
   odom.header = base.header;
   odom.child_frame_id = cfg_.base_frame_id;
   odom.pose = base.pose;
-  odom.twist.twist.linear.x = ekf.velocity();
-  odom.twist.twist.angular.z = ekf.angularVelocity();
+  odom.twist.twist.linear.x = ekf.vXy();
+  odom.twist.twist.angular.z = ekf.omegaYaw();
   const auto & P = ekf.covariance();
   odom.twist.covariance[0] = P(EkfCore::kVxy, EkfCore::kVxy);
   odom.twist.covariance[5] = P(EkfCore::kVxy, EkfCore::kOmegaYaw);

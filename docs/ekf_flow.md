@@ -129,7 +129,7 @@ classDiagram
    - ゲートの状態はコンストラクタで `EkfCore::addGates()` を呼んで確保する（履歴と一緒に巻き戻すため）
 2. ノードに、メッセージから観測を作って `addMeasurement()` に渡すコールバックを書く。
 
-`LaggedEkf` と `EkfCore` は変えなくて済みます。ログ（棄却・ロックアウト・初期化・古すぎる観測）も共通です。
+`LaggedEkf` と `EkfCore` は変えなくて済みます。ログ（棄却・初期化・古すぎる観測）も共通です。
 
 コールバックは 1 つずつ順に実行されます（シングルスレッド）。1 回の処理は最も重い場合でも 0.3 ms 未満で、50 Hz の周期に対して十分に軽い処理です。
 
@@ -171,9 +171,9 @@ dyaw/dt   = omega_yaw           pitch += omega_pitch dt
 - ヤコビアン F は単位行列に、x, y の yaw・v_xy・omega_yaw の列（今までと同じ）と、F(z, v_z) = F(roll, omega_roll) = F(pitch, omega_pitch) = dt を足したもの。
 - 共分散は P ← F P Fᵀ + diag(`Q`)·dt。
 - v_z・omega_roll・omega_pitch の `Q` と `P_init` が 0 なら、その 3 つと P のその行・列は 0 のままで、z, roll, pitch は予測で動きません
-  （`Q` のノイズだけ。足す前の 8 状態と同じ）。`ekf.yaml` の既定と Gazebo（`gazebo.yaml`）はこれです。同じ観測の列を入れて 8 状態と比べると、
+  （`Q` のノイズだけ。足す前の 8 状態と同じ）。Gazebo（`gazebo.yaml`）はこれです。同じ観測の列を入れて 8 状態と比べると、
   状態の差は丸め誤差（1e-17 以下）でした（2026-11-05）。
-- 実機 blue（`blue.yaml`）は omega_roll・omega_pitch の `Q` 0.1、v_z は 0（2026-11-07）。実機は傾きが動くので、点群の時刻の予測値（NDT の初期値）と
+- `ekf.yaml` の既定（2026-11-09 から実機 blue の値。red・white・blue で使う）は omega_roll・omega_pitch の `Q` 0.1、v_z は 0（blue の録画で 2026-11-07 に決めた）。実機は傾きが動くので、点群の時刻の予測値（NDT の初期値）と
   NDT の解の roll・pitch の差が小さくなる（調整に使っていない録画で −9 %・−5 %）。Gazebo は真の roll・pitch がほとんど動かず、0.1 にすると
   真値との差が 15 % ほど悪くなるので 0。
 - `Q` を正にすると、NDT が途切れても z, roll, pitch は v_z・omega_roll・omega_pitch で外挿されます（坂のテスト `SlopeZFollowsVzDuringNdtOutage`）。
@@ -333,7 +333,7 @@ NDT の初期値と MATLAB の点群の座標変換は、この `/tf` を点群�
 その時刻の事後推定値）と、MATLAB 用の `base_pose`・`vlp16_pose`・`vlp16_points`、NDT で更新した直後の値を出す `tf_ndt_update` はやめた。）
 
 観測の時刻はメッセージの stamp です。受信した時刻を使うとき（環境ファイルの `stamp_mode` が `receipt`・`auto`）は、NDT が `/ndt_pose` の、
-`odom_covariance` が `/localization/odom` の stamp に受信した時刻を入れます（点群のトピック自体の stamp は変えません）。
+`odom_relay` が `/localization/odom` の stamp に受信した時刻を入れます（点群のトピック自体の stamp は変えません）。
 
 流れ：
 

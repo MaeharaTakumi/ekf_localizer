@@ -96,20 +96,18 @@ public:
 
   const StateVector & state() const {return x_;}
   const StateMatrix & covariance() const {return P_;}
-  /// 観測モデル用（ロックアウトの再初期化など、一般形の更新で書けない変更）
+  /// 観測モデル用（初期化を補うときなど、一般形の更新で書けない変更）
   StateVector & mutableState() {return x_;}
   StateMatrix & mutableCovariance() {return P_;}
 
   /// 推定した base の姿勢 map → base（状態そのもの）
   Eigen::Affine3d basePose() const {return poseFromState(x_);}
   /// 水平面の前向きの速さ v_xy
-  double velocity() const {return x_(kVxy);}
+  double vXy() const {return x_(kVxy);}
   /// yaw の角速度 omega_yaw
-  double angularVelocity() const {return x_(kOmegaYaw);}
+  double omegaYaw() const {return x_(kOmegaYaw);}
   /// 状態が表している時刻 t_x [s]（最後に予測・初期化した時刻）
   double lastStamp() const {return t_last_;}
-  double lastDt() const {return last_dt_;}
-  bool lastDtClamped() const {return last_dt_clamped_;}
 
   /// ゲートを n 個確保し、先頭の番号を返す（観測モデルの作成時に呼ぶ）
   int addGates(int n);
@@ -133,8 +131,6 @@ private:
   StateVector x_{StateVector::Zero()};
   StateMatrix P_{StateMatrix::Identity()};
   double t_last_{0.0};
-  double last_dt_{0.0};
-  bool last_dt_clamped_{false};
   bool initialized_{false};
   std::vector<GateState> gates_;
   std::shared_ptr<const Measurement> init_aid_;

@@ -25,7 +25,7 @@
       Q:      [5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 0.0, 0.1, 0.1, 10.0]
       P_init: [2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.0, 0.01, 0.01, 0.01]
       R_ndt:  [0.000208, 0.000155, 9.61e-05, 5.89e-05, 6.32e-05, 1.23e-05] # [x, y, z, roll, pitch, yaw]（LiDAR）
-      # オドメトリの観測ノイズ（分散）。全環境で同じ値（2026-11-09 に odom_covariance から移した。実機 blue の値）
+      # オドメトリの観測ノイズ（分散）。全環境で同じ値（2026-11-09 に当時の odom_covariance（今の odom_relay）から移した。実機 blue の値）
       #   R_v     = R_odom[0] + odom_noise_alpha[0]·v² + odom_noise_alpha[1]·ω² + (accel_noise_tau[0]·dv/dt)²
       #   R_omega = R_odom[1] + odom_noise_alpha[2]·v² + odom_noise_alpha[3]·ω² + (accel_noise_tau[1]·dω/dt)²
       R_odom: [6.08e-3, 9.92e-4]                # 速さ・加速度によらない分 [v, omega]

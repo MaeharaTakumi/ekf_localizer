@@ -184,7 +184,7 @@ TEST(LaggedEkf, DelayedNdtMatchesInOrder)
   const Eigen::Affine3d T = lagged.current().basePose();
   const Eigen::Affine3d T_true = truth(lagged.current().lastStamp());
   EXPECT_LT((T.translation() - T_true.translation()).head<2>().norm(), 0.1);
-  EXPECT_NEAR(lagged.current().velocity(), kV, 0.1);
+  EXPECT_NEAR(lagged.current().vXy(), kV, 0.1);
 }
 
 TEST(LaggedEkf, OutOfOrderOdomMatchesInOrder)
@@ -220,7 +220,7 @@ TEST(LaggedEkf, InitializesFromDelayedNdtAndCatchesUp)
   ASSERT_TRUE(lagged.initialized());
   // 最新のオドメトリの時刻まで追いつき、速度は初期化前のオドメトリから始まっている
   EXPECT_NEAR(lagged.current().lastStamp(), kT0 + 0.30, 1e-12);
-  EXPECT_NEAR(lagged.current().velocity(), kV, 1e-3);
+  EXPECT_NEAR(lagged.current().vXy(), kV, 1e-3);
   const Eigen::Affine3d T_true = truth(kT0 + 0.30);
   EXPECT_LT(
     (lagged.current().basePose().translation() - T_true.translation()).norm(), 1e-2);

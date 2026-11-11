@@ -229,7 +229,7 @@ SimResult simulate(Rig & rig, const SimConfig & cfg, const TestParams & p)
     res.psd_always &= psdOK(ekf.covariance());
     const auto b = ekf.basePose().translation();
     res.samples.push_back(
-      {tr, std::hypot(b.x() - s.x, b.y() - s.y), ekf.velocity(), ekf.angularVelocity(), s.v, s.w,
+      {tr, std::hypot(b.x() - s.x, b.y() - s.y), ekf.vXy(), ekf.omegaYaw(), s.v, s.w,
         normalizeAngle(ekf.state()(EkfCore::kYaw) - s.psi)});
   }
   return res;
@@ -398,8 +398,8 @@ TEST(NdtModel, RecoversBaseLinkWhileTurning)
       ++n;
     }
   }
-  EXPECT_NEAR(ekf.velocity(), V, 0.15);
-  EXPECT_NEAR(ekf.angularVelocity(), W, 0.1);
+  EXPECT_NEAR(ekf.vXy(), V, 0.15);
+  EXPECT_NEAR(ekf.omegaYaw(), W, 0.1);
   EXPECT_LT(se / n, 0.09) << "base_link 位置誤差 < 生観測ノイズ(約0.13m)の7割";
   EXPECT_NEAR(ekf.basePose().translation().z(), 0.0, 0.05) << "LiDAR z 1.2 - o_z 1.2";
   // 1 サンプルは観測ノイズ（sd 0.03 rad）並みに揺れるので、区間平均でバイアスが無いことを見る
@@ -850,15 +850,15 @@ TEST(OdomModel, InitializesVelocityFromRecentOdom)
   EXPECT_TRUE(o.stages.empty());
   EXPECT_FALSE(recent.core.initialized());
   EXPECT_TRUE(recent.addNdt(lidarObs(p, 0, 0, 0), 100.0).aided);
-  EXPECT_DOUBLE_EQ(recent.core.velocity(), 0.8);
-  EXPECT_DOUBLE_EQ(recent.core.angularVelocity(), 0.2);
+  EXPECT_DOUBLE_EQ(recent.core.vXy(), 0.8);
+  EXPECT_DOUBLE_EQ(recent.core.omegaYaw(), 0.2);
   EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kVxy, EkfCore::kVxy), r(0));
   EXPECT_DOUBLE_EQ(recent.core.covariance()(EkfCore::kOmegaYaw, EkfCore::kOmegaYaw), r(1));
 
   Rig stale = makeRig(p, true);
   stale.addOdom(0.8, 0.2, r, 99.0);   // 1 s 前は odom_timeout_init(0.2) を超える
   EXPECT_FALSE(stale.addNdt(lidarObs(p, 0, 0, 0), 100.0).aided);
-  EXPECT_DOUBLE_EQ(stale.core.velocity(), 0.0);
+  EXPECT_DOUBLE_EQ(stale.core.vXy(), 0.0);
   EXPECT_DOUBLE_EQ(
     stale.core.covariance()(EkfCore::kVxy, EkfCore::kVxy), p.core.p_init(EkfCore::kVxy));
 
@@ -867,7 +867,7 @@ TEST(OdomModel, InitializesVelocityFromRecentOdom)
   EXPECT_FALSE(recent.core.initialized());
   recent.addOdom(0.5, -0.1, r, 105.0);
   EXPECT_TRUE(recent.addNdt(lidarObs(p, 0, 0, 0), 105.05).aided);
-  EXPECT_DOUBLE_EQ(recent.core.velocity(), 0.5);
+  EXPECT_DOUBLE_EQ(recent.core.vXy(), 0.5);
 }
 
 // ---- OdomNoise（オドメトリの観測ノイズの計算）----

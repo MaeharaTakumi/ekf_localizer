@@ -65,7 +65,6 @@ public:
   /// m が履歴に無い（古すぎて捨てた・起点に畳み込んだ）なら nullopt
   std::optional<EkfCore> stateAfter(const MeasurementPtr & m) const;
   std::size_t historySize() const {return history_.size();}
-  double historyLength() const {return history_length_;}
   /// 最新の観測の時刻。履歴が空なら起点の時刻（リセット直後は -inf）
   double latestStamp() const {return history_.empty() ? anchor_stamp_ : history_.back().m->stamp;}
 
