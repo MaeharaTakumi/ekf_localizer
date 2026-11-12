@@ -5,7 +5,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 
 - 状態：`[x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw]`（`base_frame_id` の姿勢と、水平面の前向きの速さ・
   地図の z の速度・roll, pitch, yaw の変化率）。運動は各軸が独立（[docs/ekf_flow.md](docs/ekf_flow.md) の「運動モデル」）。
-  `v_z`・`omega_roll`・`omega_pitch` は `Q`・`P_init` を 0 にすると 0 のまま動かず、足す前の 8 状態と同じになる（Gazebo の環境ファイル `gazebo.yaml` は 3 つとも 0。
+  `v_z`・`omega_roll`・`omega_pitch` は `Q`・`P_init` を 0 にすると 0 のまま動かず、足す前の 8 状態と同じになる（Gazebo の環境ファイル（localization_bringup の `param/gazebo/ekf_localizer.yaml`）の `Q` は 3 つとも 0。
   コードの既定は 2026-11-09 から実機 blue の値で、`omega_roll`・`omega_pitch` の `Q` 0.1・`v_z` 0）
 - 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v_xy, omega_yaw]`（`use_odom: true`）
 - **観測の遅れ**：NDT は `ndt_delay`、オドメトリは `odom_delay` 秒だけ stamp を戻して入れます
@@ -26,7 +26,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 | 出力 | `ekf_odom` | nav_msgs/Odometry | map → base と v_xy（`twist.linear.x`）, omega_yaw（`twist.angular.z`）。v_z・omega_roll・omega_pitch は地図の z とオイラー角の変化率で、base 座標の twist と合わないので出さない |
 | 出力 | TF | | `map_frame_id` → `base_frame_id`（常に配信）。`predict_rate` の周期で、最新の状態を現在時刻まで予測した値。NDT の初期値と MATLAB はこの TF を点群の stamp の時刻で引く（tf2 が前後の値を補間する）。MATLAB は最新の値を今の姿勢にも使う。`tf_future_steps` が 1 以上なら、周期の刻みの stamp で今より先の刻みも送る（下記） |
 
-購読するトピック名はパラメータで変えられます（リマップでも変えられます）。
+購読・配信するトピック名を変えるときは remap します（トピック名のパラメータはありません。下記）。
 
 ## パラメータ
 
@@ -41,7 +41,7 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
 |---|---|---|
 | `use_odom` | true | オドメトリを観測に使うか。false なら NDT だけ（v, omega も NDT の姿勢の変化から推定） |
 | `predict_rate` | 50.0 | 最新の状態を現在時刻まで予測して TF・`ekf_pose`・`ekf_odom` を配信する周期 [Hz]。オドメトリと同じ 50 Hz にしている（点群は stamp から約 15 ms 後に届くので、NDT・MATLAB が点群の stamp より後の TF を待つのは最大 5 ms ほど。Gazebo の `/clock` は 10 ms 刻みなので 100 Hz より速くしても出る数は増えない） |
-| `tf_future_steps` | 0 | TF を `predict_rate` の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。0 なら今の時刻の 1 個だけ（刻みにしない）。下記 |
+| `tf_future_steps` | 0 | TF を `predict_rate` の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。0 なら今の時刻の 1 個だけ（刻みにしない）。localization_bringup の環境ファイルは 4 つとも 2（`tf_past_steps` 1）。下記 |
 | `tf_past_steps` | 0 | `tf_future_steps` が 1 以上のとき、今以前の刻みを何個送り直すか。0 なら送らない。`history_length` より短くする |
 | `history_length` | 1.0 | 巻き戻しのために観測を保持する長さ [s]。NDT の遅れ（計算時間＋通信）より長くする |
 | `max_predict_dt` | 0.2 | 1 回の予測で進める時間の上限 [s]。下記 |

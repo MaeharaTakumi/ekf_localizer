@@ -36,6 +36,7 @@ flowchart LR
 | `ObservationModel` | `src/observation_model.cpp` | 観測モデルのインターフェースと、観測を 1 つ適用する共通の流れ（`applyMeasurement`、2 章） |
 | `NdtModel` | `src/ndt_model.cpp` | NDT の解の観測モデル（LiDAR の姿勢を base の姿勢に直して初期化・6 成分を 1 回で更新） |
 | `OdomModel` | `src/odom_model.cpp` | オドメトリの観測モデル（`use_odom: true` のときだけ作る） |
+| `OdomNoise` | `src/odom_model.cpp` | オドメトリの観測ノイズ R の計算（速さ・加速度に応じた分。直前の速度を覚えるので観測モデルとは別。`use_odom: true` のときだけ作る） |
 
 ### クラスの関係
 
@@ -51,6 +52,7 @@ classDiagram
   class EkfFilter {
     +shared_ptr~NdtModel~ ndt
     +shared_ptr~OdomModel~ odom
+    +shared_ptr~OdomNoise~ odom_noise
     +unique_ptr~LaggedEkf~ lagged
   }
   class LaggedEkf {
@@ -60,6 +62,7 @@ classDiagram
     +reset()
     +current() EkfCore
     +predicted(t) EkfCore
+    +at(t) EkfCore
   }
   class EkfCore {
     -x, P, t_x
@@ -89,7 +92,7 @@ classDiagram
     -T_BL mount_
     +measurement(z, t) MeasurementPtr
     +lidarPose(x)
-    +observationJacobian(x)
+    +lidarPoseJacobian(x)
   }
   class OdomModel {
     -Params prm_
@@ -171,7 +174,7 @@ dyaw/dt   = omega_yaw           pitch += omega_pitch dt
 - ヤコビアン F は単位行列に、x, y の yaw・v_xy・omega_yaw の列（今までと同じ）と、F(z, v_z) = F(roll, omega_roll) = F(pitch, omega_pitch) = dt を足したもの。
 - 共分散は P ← F P Fᵀ + diag(`Q`)·dt。
 - v_z・omega_roll・omega_pitch の `Q` と `P_init` が 0 なら、その 3 つと P のその行・列は 0 のままで、z, roll, pitch は予測で動きません
-  （`Q` のノイズだけ。足す前の 8 状態と同じ）。Gazebo（`gazebo.yaml`）はこれです。同じ観測の列を入れて 8 状態と比べると、
+  （`Q` のノイズだけ。足す前の 8 状態と同じ）。Gazebo（localization_bringup の `param/gazebo/ekf_localizer.yaml`）はこれです。同じ観測の列を入れて 8 状態と比べると、
   状態の差は丸め誤差（1e-17 以下）でした（2026-11-05）。
 - コードの既定（2026-11-09 から実機 blue の値。red・white・blue で使う）は omega_roll・omega_pitch の `Q` 0.1、v_z は 0（blue の録画で 2026-11-07 に決めた）。実機は傾きが動くので、点群の時刻の予測値（NDT の初期値）と
   NDT の解の roll・pitch の差が小さくなる（調整に使っていない録画で −9 %・−5 %）。Gazebo は真の roll・pitch がほとんど動かず、0.1 にすると
@@ -283,7 +286,8 @@ flowchart TD
   速度 5 つは 0 から始めます。ただし `use_odom: true` で、覚えているオドメトリの時刻 t_o が |t_z − t_o| ≤ `odom_timeout_init`（0.2 秒）なら、
   v_xy = v_o、omega_yaw = omega_o とし、その分散を観測ノイズの値にします（`EKF initialized by NDT (v_xy, omega_yaw = ... from Odometry)`）。
 - **base の姿勢に直した更新**：観測には LiDAR の姿勢と `R_ndt` をそのまま持ち、更新のたびに次のように直して、
-  共通の流れの判定・更新を 6 成分まとめて 1 回で行います（ゲート `gate_ndt`、既定 16.81 = χ²(6) の 99%）。
+  共通の流れの判定・更新を 6 成分まとめて 1 回で行います（ゲート `gate_ndt`。ノードの既定は 1.0e5 で実質無効。
+  `NdtModel::Params` の既定 16.81 = χ²(6) の 99% はテストで使う）。
   - 観測値：z_B = T_L · T_BL⁻¹ を [x, y, z, roll, pitch, yaw] にしたもの（厳密）。h(x) は状態の先頭 6 成分、H = [I 0]
   - 観測ノイズ：R = J diag(`R_ndt`) Jᵀ。J は z_L → z_B のヤコビアン（中心差分）。LiDAR は base から離れている（高さ約 1.1 m）ので、
     LiDAR の roll・pitch の誤差が base の x, y に回り、位置と姿勢の相関が入る
@@ -392,7 +396,10 @@ flowchart TD
 | 環境 | 時計 | 点群の stamp | オドメトリの stamp |
 |---|---|---|---|
 | Gazebo | sim time（`/clock`） | Gazebo が付けた値をそのまま使う | Gazebo が付けた値をそのまま使う |
-| 実機 | この PC の時計 | この PC の時計に直してから入れる | この PC の受信時刻 |
+| 実機 | この PC の時計（LiDAR の PC・ラズパイと時刻同期している） | LiDAR の PC が付けた値をそのまま使う | ラズパイが付けた値をそのまま使う（whill_odometry の `use_stamped_input: true`） |
+
+今はどの環境も stamp をそのまま使います（NDT の `stamp_mode`・このノードの `odom_stamp_mode` とも `stamp`）。時計がずれている環境では、
+両方を `receipt`（受け取った時刻）か `auto`（ずれが閾値以上のときだけ受け取った時刻）にします（4 章）。
 
 ## パラメータ
 
@@ -402,5 +409,5 @@ flowchart TD
 
 - **オドメトリと NDT には、棄却が続いたときに回復する仕組みがありません。** `Q` が実際の動きに対して小さいと、棄却が続いたまま戻らなくなります。
   オドメトリの遅れ（`odom_delay`）を補っていないときや、車輪の滑りが大きいときに、yaw の `Q` を小さくするとこの状態になります。
-- 旋回の反転のように omega が段差で変わる瞬間は、オドメトリに現れるまで（移動平均で約 0.1 s）予測が追いつかず、
-  その間だけ yaw が数度ずれます（Gazebo の反転で約 5°、0.15 s）。
+- 旋回の反転のように omega が段差で変わる瞬間は、オドメトリに現れるまで予測が追いつかず、その間だけ yaw がずれます
+  （Gazebo のオドメトリが 0.2 s の移動平均で約 0.1 s 遅れていたころ（2026-10-12 まで）の反転で約 5°、0.15 s。移動平均を 1 にした後は測っていません）。
