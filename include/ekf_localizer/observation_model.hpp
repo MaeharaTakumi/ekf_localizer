@@ -19,8 +19,8 @@ struct Measurement
 {
   /// この観測を処理する観測モデル
   std::shared_ptr<const ObservationModel> model;
-  /// 観測の時刻 t_z [s]（stamp から遅れを引いた値）
-  double stamp{0.0};
+  /// 観測の時刻 t_z [s]（メッセージの stamp から遅れを引いた値）
+  double time{0.0};
   /// 観測値
   Eigen::VectorXd z;
   /// 観測ノイズの分散（z と同じ並び）
@@ -34,7 +34,7 @@ struct StageResult
 {
   enum class Status {kUpdated, kRejected};
 
-  /// 段の名前（ログ用。"x/y/yaw" など）
+  /// 段の名前（ログ用。"pose" など）
   const char * name{""};
   Status status{Status::kRejected};
   double d2{0.0};
@@ -46,7 +46,7 @@ struct StageResult
 ///
 ///   観測モデルは設定だけを持ち、変わる値は持たない。ゲートの状態など、履歴と一緒に巻き戻す値は
 ///   EkfCore に置く（コンストラクタで EkfCore::addGates() を呼んで確保する）。
-///   std::make_shared で作ること（measurement() が自分への shared_ptr を観測に入れる）。
+///   std::make_shared で作ること（makeMeasurement() が自分への shared_ptr を観測に入れる）。
 class ObservationModel : public std::enable_shared_from_this<ObservationModel>
 {
 public:
@@ -73,12 +73,40 @@ public:
   virtual std::vector<StageResult> update(EkfCore & core, const Measurement & m) const = 0;
 
 protected:
-  /// この観測モデルの観測を作る
-  MeasurementPtr makeMeasurement(double stamp, Eigen::VectorXd z, Eigen::VectorXd r) const;
+  /// この観測モデルの観測（時刻 t）を作る
+  MeasurementPtr makeMeasurement(double t, Eigen::VectorXd z, Eigen::VectorXd r) const;
+
+  /// ゲートつきの更新を 1 段行う。ゲートの状態（番号 gate_index）の連続棄却回数と d² を書き換え、段の結果を返す
+  template<int M>
+  static StageResult gatedUpdate(
+    EkfCore & core, const char * stage_name, int gate_index,
+    const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, EkfCore::kStateSize> & H,
+    const Eigen::Matrix<double, M, M> & R, double gate_threshold);
 };
 
+template<int M>
+StageResult ObservationModel::gatedUpdate(
+  EkfCore & core, const char * stage_name, int gate_index,
+  const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, EkfCore::kStateSize> & H,
+  const Eigen::Matrix<double, M, M> & R, double gate_threshold)
+{
+  EkfCore::GateState & gate_state = core.gateState(gate_index);
+  StageResult res;
+  res.name = stage_name;
+  if (core.kalmanUpdate<M>(y, H, R, gate_threshold, gate_state.last_d2)) {
+    gate_state.reject_count = 0;
+    res.status = StageResult::Status::kUpdated;
+  } else {
+    ++gate_state.reject_count;
+    res.status = StageResult::Status::kRejected;
+  }
+  res.d2 = gate_state.last_d2;
+  res.reject_count = gate_state.reject_count;
+  return res;
+}
+
 /// 観測を 1 つ適用した結果
-struct Outcome
+struct ApplyResult
 {
   /// 適用する前に初期化済みだったか
   bool was_initialized{false};
@@ -94,7 +122,7 @@ struct Outcome
 ///   1. 初期化用の観測なら覚えておく
 ///   2. 未初期化：初期化できる観測なら初期化し、覚えておいた観測で補う。できなければ何もしない
 ///   3. 初期化済み：t_z まで予測して更新する
-Outcome applyMeasurement(EkfCore & core, const MeasurementPtr & m);
+ApplyResult applyMeasurement(EkfCore & core, const MeasurementPtr & m);
 
 }  // namespace ekf_localizer
 

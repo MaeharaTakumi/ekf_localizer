@@ -54,9 +54,12 @@ Filter makeFilter(bool use_odom = true)
   cp.p_init << 2e-2, 2e-2, 2e-2, 0.06, 0.06, 2e-3, 1.0, 0.0, 0.0, 0.0, 1.0;
   NdtModel::Params np;
   np.r << 1e-2, 1e-2, 1e-2, 0.03, 0.03, 1e-3;
+  np.gate_threshold = 16.81;   // χ²(6) の 99%
+  OdomModel::Params op;
+  op.gate_threshold = 9.21;    // χ²(2) の 99%
   Filter f{EkfCore(cp), nullptr, nullptr};
   f.ndt = std::make_shared<NdtModel>(np, mount(), f.core);
-  if (use_odom) {f.odom = std::make_shared<OdomModel>(OdomModel::Params(), f.core);}
+  if (use_odom) {f.odom = std::make_shared<OdomModel>(op, f.core);}
   return f;
 }
 
@@ -84,7 +87,8 @@ V6 poseVec(const Eigen::Affine3d & T)
 struct Meas
 {
   bool ndt{false};
-  double stamp{0.0};
+  /// 観測の時刻
+  double time{0.0};
   /// LaggedEkf に届く時刻
   double arrival{0.0};
   V6 z{V6::Zero()};
@@ -100,7 +104,7 @@ std::vector<Meas> scenario(double ndt_delay, double duration = 2.0, unsigned see
   std::vector<Meas> ms;
   for (int i = 0; i * 0.02 <= duration; ++i) {
     Meas m;
-    m.stamp = m.arrival = kT0 + i * 0.02;
+    m.time = m.arrival = kT0 + i * 0.02;
     m.v = kV + 0.02 * n(rng);
     m.omega = kOmega + 0.02 * n(rng);
     ms.push_back(m);
@@ -109,9 +113,9 @@ std::vector<Meas> scenario(double ndt_delay, double duration = 2.0, unsigned see
   for (int k = 0; k * 0.1 <= duration; ++k) {
     Meas m;
     m.ndt = true;
-    m.stamp = kT0 + k * 0.1 + 0.005;
-    m.arrival = m.stamp + ndt_delay;
-    m.z = poseVec(truth(m.stamp) * mount());
+    m.time = kT0 + k * 0.1 + 0.005;
+    m.arrival = m.time + ndt_delay;
+    m.z = poseVec(truth(m.time) * mount());
     m.z(0) += 0.05 * n(rng);
     m.z(1) += 0.05 * n(rng);
     m.z(5) += 0.01 * n(rng);
@@ -122,15 +126,15 @@ std::vector<Meas> scenario(double ndt_delay, double duration = 2.0, unsigned see
 
 ekf_localizer::MeasurementPtr toMeasurement(const Filter & f, const Meas & m)
 {
-  return m.ndt ? f.ndt->measurement(m.z, m.stamp) :
-         f.odom->measurement(m.v, m.omega, kROdom, m.stamp);
+  return m.ndt ? f.ndt->measurement(m.z, m.time) :
+         f.odom->measurement(m.v, m.omega, kROdom, m.time);
 }
 
 /// 時刻順に並べ直して、巻き戻しなしの EKF にそのまま適用した結果（正解）
 EkfCore runInOrder(std::vector<Meas> ms, bool use_odom = true)
 {
   std::stable_sort(
-    ms.begin(), ms.end(), [](const Meas & a, const Meas & b) {return a.stamp < b.stamp;});
+    ms.begin(), ms.end(), [](const Meas & a, const Meas & b) {return a.time < b.time;});
   Filter f = makeFilter(use_odom);
   for (const Meas & m : ms) {
     applyMeasurement(f.core, toMeasurement(f, m));
@@ -156,7 +160,7 @@ void expectSameState(const EkfCore & a, const EkfCore & b, double tol = 1e-9)
 {
   ASSERT_TRUE(a.initialized());
   ASSERT_TRUE(b.initialized());
-  EXPECT_NEAR(a.lastStamp(), b.lastStamp(), 1e-12);
+  EXPECT_NEAR(a.time(), b.time(), 1e-12);
   EXPECT_LT((a.state() - b.state()).cwiseAbs().maxCoeff(), tol);
   EXPECT_LT((a.covariance() - b.covariance()).cwiseAbs().maxCoeff(), tol);
 }
@@ -182,7 +186,7 @@ TEST(LaggedEkf, DelayedNdtMatchesInOrder)
   expectSameState(lagged.current(), runInOrder(ms));
   // 推定も真値に追従している
   const Eigen::Affine3d T = lagged.current().basePose();
-  const Eigen::Affine3d T_true = truth(lagged.current().lastStamp());
+  const Eigen::Affine3d T_true = truth(lagged.current().time());
   EXPECT_LT((T.translation() - T_true.translation()).head<2>().norm(), 0.1);
   EXPECT_NEAR(lagged.current().vXy(), kV, 0.1);
 }
@@ -206,7 +210,7 @@ TEST(LaggedEkf, InitializesFromDelayedNdtAndCatchesUp)
   LaggedEkf lagged(f.core, 1.0);
   for (int i = 0; i <= 15; ++i) {
     const auto r = lagged.add(f.odom->measurement(kV, kOmega, kROdom, kT0 + i * 0.02));
-    EXPECT_FALSE(r.outcome.was_initialized);
+    EXPECT_FALSE(r.apply_result.was_initialized);
   }
   EXPECT_FALSE(lagged.initialized());
 
@@ -214,12 +218,12 @@ TEST(LaggedEkf, InitializesFromDelayedNdtAndCatchesUp)
   const auto r = lagged.add(
     f.ndt->measurement(poseVec(truth(kT0 + 0.105) * mount()), kT0 + 0.105));
   EXPECT_EQ(r.status, Status::kReplayed);
-  EXPECT_TRUE(r.outcome.initialized_now);
-  EXPECT_TRUE(r.outcome.aided);
+  EXPECT_TRUE(r.apply_result.initialized_now);
+  EXPECT_TRUE(r.apply_result.aided);
   EXPECT_EQ(r.replayed, 10u);   // t0 + 0.12 〜 t0 + 0.30 のオドメトリ
   ASSERT_TRUE(lagged.initialized());
   // 最新のオドメトリの時刻まで追いつき、速度は初期化前のオドメトリから始まっている
-  EXPECT_NEAR(lagged.current().lastStamp(), kT0 + 0.30, 1e-12);
+  EXPECT_NEAR(lagged.current().time(), kT0 + 0.30, 1e-12);
   EXPECT_NEAR(lagged.current().vXy(), kV, 1e-3);
   const Eigen::Affine3d T_true = truth(kT0 + 0.30);
   EXPECT_LT(
@@ -249,11 +253,11 @@ TEST(LaggedEkf, PredictedDoesNotChangeCurrent)
   LaggedEkf lagged(f.core, 1.0);
   runLagged(lagged, f, scenario(0.0, 1.0));
   const EkfCore::StateVector x = lagged.current().state();
-  const double t = lagged.current().lastStamp();
+  const double t = lagged.current().time();
 
   const EkfCore pred = lagged.predicted(t + 0.05);
   EXPECT_EQ(lagged.current().state(), x);
-  EXPECT_NEAR(pred.lastStamp(), t + 0.05, 1e-12);
+  EXPECT_NEAR(pred.time(), t + 0.05, 1e-12);
   EkfCore ref = lagged.current();
   ref.predictTo(t + 0.05);
   EXPECT_EQ(pred.state(), ref.state());
@@ -275,11 +279,11 @@ TEST(LaggedEkf, ResetWaitsForNextNdt)
   EXPECT_EQ(lagged.historySize(), 0u);
   const double t = kT0 + 1.2;
   EXPECT_FALSE(
-    lagged.add(f.odom->measurement(kV, kOmega, kROdom, t)).outcome.was_initialized);
+    lagged.add(f.odom->measurement(kV, kOmega, kROdom, t)).apply_result.was_initialized);
   EXPECT_FALSE(lagged.initialized());
 
   const auto r = lagged.add(f.ndt->measurement(poseVec(truth(t + 0.01) * mount()), t + 0.01));
-  EXPECT_TRUE(r.outcome.initialized_now);
+  EXPECT_TRUE(r.apply_result.initialized_now);
   EXPECT_TRUE(lagged.initialized());
 }
 
@@ -310,44 +314,44 @@ TEST(LaggedEkf, AtUsesOnlyMeasurementsUpToT)
     std::vector<Meas> before;
     std::copy_if(
       ms.begin(), ms.end(), std::back_inserter(before),
-      [t](const Meas & m) {return m.stamp <= t;});
+      [t](const Meas & m) {return m.time <= t;});
     EkfCore ref = runInOrder(before);
     ref.predictTo(t);
     expectSameState(lagged.at(t), ref);
   }
   // current() は変えない
-  EXPECT_GT(lagged.current().lastStamp(), kT0 + 0.905);
+  EXPECT_GT(lagged.current().time(), kT0 + 0.905);
 }
 
 TEST(LaggedEkf, AtBeforeInitializationOrAnchorIsDetectable)
 {
   // ekf_localizer は過ぎた刻みの TF を at(t) で送り直す。初期化より前の t は初期化前の状態、
-  // 履歴の起点より前の t は起点の時刻のまま（lastStamp() > t）になるので、ノードはそれを見て送らない
+  // 履歴の起点より前の t は起点の時刻のまま（time() > t）になるので、ノードはそれを見て送らない
   std::vector<Meas> ms = scenario(0.0, 2.0);
   // 最初の NDT より前のオドメトリは、初期化前に履歴に入る
   ms.erase(
-    std::remove_if(ms.begin(), ms.end(), [](const Meas & m) {return m.ndt && m.stamp < kT0 + 0.3;}),
+    std::remove_if(ms.begin(), ms.end(), [](const Meas & m) {return m.ndt && m.time < kT0 + 0.3;}),
     ms.end());
   const Filter f = makeFilter();
   LaggedEkf lagged(f.core, 0.5);
   runLagged(lagged, f, ms);
   ASSERT_TRUE(lagged.initialized());
 
-  const double latest = lagged.latestStamp();
+  const double latest = lagged.latestTime();
   // 起点より前：起点の時刻のまま
   const EkfCore old = lagged.at(latest - 0.8);
   EXPECT_TRUE(old.initialized());
-  EXPECT_GT(old.lastStamp(), latest - 0.8);
+  EXPECT_GT(old.time(), latest - 0.8);
   // 履歴の中：t まで予測した値
   const EkfCore in = lagged.at(latest - 0.2);
-  EXPECT_DOUBLE_EQ(in.lastStamp(), latest - 0.2);
+  EXPECT_DOUBLE_EQ(in.time(), latest - 0.2);
 
   // 初期化し直したあと、初期化（latest + 約 0.3 の NDT）より前の t は初期化前の状態。
   // 初期化前のオドメトリが起点に畳み込まれないよう、history_length（0.5 s）の中で止める
   lagged.reset();
   std::vector<Meas> after;
   for (const Meas & m : scenario(0.0, 3.0)) {
-    if (m.stamp > latest && m.stamp < latest + 0.45 && !(m.ndt && m.stamp < latest + 0.25)) {
+    if (m.time > latest && m.time < latest + 0.45 && !(m.ndt && m.time < latest + 0.25)) {
       after.push_back(m);
     }
   }
@@ -371,16 +375,16 @@ TEST(LaggedEkf, StateAfterIsPosteriorOfThatNdt)
   for (const Meas & meas : sorted) {
     const auto m = toMeasurement(f, meas);
     lagged.add(m);
-    if (!meas.ndt || meas.stamp < kT0 + 0.3) {continue;}
+    if (!meas.ndt || meas.time < kT0 + 0.3) {continue;}
     const std::optional<EkfCore> post = lagged.stateAfter(m);
     ASSERT_TRUE(post.has_value());
     std::vector<Meas> upto;
     std::copy_if(
       ms.begin(), ms.end(), std::back_inserter(upto),
-      [&meas](const Meas & x) {return x.stamp <= meas.stamp;});
+      [&meas](const Meas & x) {return x.time <= meas.time;});
     expectSameState(*post, runInOrder(upto));
-    expectSameState(*post, lagged.at(meas.stamp));
-    if (lagged.current().lastStamp() > meas.stamp) {++replayed;}   // 後続のオドメトリを適用し直した
+    expectSameState(*post, lagged.at(meas.time));
+    if (lagged.current().time() > meas.time) {++replayed;}   // 後続のオドメトリを適用し直した
     ++checked;
   }
   EXPECT_GE(checked, 6);

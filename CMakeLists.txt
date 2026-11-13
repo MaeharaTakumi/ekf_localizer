@@ -25,6 +25,7 @@ find_package(tf2_msgs REQUIRED)
 
 # ROS に依存しない EKF 本体（ノードとテストで共用）
 add_library(ekf_core STATIC
+  src/pose_utils.cpp
   src/ekf_core.cpp
   src/observation_model.cpp
   src/ndt_model.cpp
@@ -39,6 +40,7 @@ target_include_directories(ekf_core PUBLIC
 
 add_executable(ekf_localizer_node
   src/ekf_params.cpp
+  src/ekf_filter.cpp
   src/ekf_localizer_node.cpp
   src/ekf_localizer_main.cpp
 )
@@ -61,8 +63,12 @@ install(TARGETS ekf_localizer_node
 if(BUILD_TESTING)
   # EKF の単体テスト（ROS 非依存）。colcon test --packages-select ekf_localizer
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_ekf_models test/test_ekf_models.cpp)
-  target_link_libraries(test_ekf_models ekf_core)
+  ament_add_gtest(test_ekf_core test/test_ekf_core.cpp)
+  target_link_libraries(test_ekf_core ekf_core)
+  ament_add_gtest(test_ndt_model test/test_ndt_model.cpp)
+  target_link_libraries(test_ndt_model ekf_core)
+  ament_add_gtest(test_odom_model test/test_odom_model.cpp)
+  target_link_libraries(test_odom_model ekf_core)
   ament_add_gtest(test_lagged_ekf test/test_lagged_ekf.cpp)
   target_link_libraries(test_lagged_ekf ekf_core)
   ament_add_gtest(test_tf_grid test/test_tf_grid.cpp)

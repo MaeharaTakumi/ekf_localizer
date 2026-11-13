@@ -4,50 +4,79 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ekf_localizer
 {
 
-void declareEkfParameters(rclcpp::Node & node)
+namespace
 {
-  node.declare_parameter("use_odom", true);
-  node.declare_parameter("predict_rate", 50.0);
-  node.declare_parameter("tf_future_steps", 0);
-  node.declare_parameter("tf_past_steps", 0);
-  node.declare_parameter("history_length", 1.0);
-  node.declare_parameter("map_frame_id", "map");
-  node.declare_parameter("base_frame_id", "base_link");
-  node.declare_parameter("lidar_frame_id", "velodyne");
-  node.declare_parameter(
-    "Q", std::vector<double>{
-      5.0e-2, 5.0e-2, 5.0e-3, 5.0e-2, 5.0e-2, 5.0e-2, 0.05, 0.0, 0.1, 0.1, 10.0});
-  node.declare_parameter(
-    "R_ndt", std::vector<double>{2.08e-4, 1.55e-4, 9.61e-5, 5.89e-5, 6.32e-5, 1.23e-5});
-  node.declare_parameter("max_predict_dt", 0.2);
-  node.declare_parameter(
-    "P_init", std::vector<double>{
-      2.0e-1, 2.0e-1, 2.0e-1, 0.01, 0.01, 0.01, 0.01, 0.0, 0.01, 0.01, 0.01});
-  // ゲートの既定 1.0e5 は実質無効（χ²(6) の 99% は 16.81。観測モデルの構造体の既定はこちらで、テストで使う）
-  node.declare_parameter("gate_ndt", 1.0e5);
-  node.declare_parameter("ndt_delay", 0.0);
 
-  // オドメトリ観測（use_odom: true のみ）
-  node.declare_parameter("R_odom", std::vector<double>{6.08e-3, 9.92e-4});
-  node.declare_parameter("odom_noise_alpha", std::vector<double>{0.0, 0.0, 0.0, 0.0});
-  node.declare_parameter("accel_noise_tau", std::vector<double>{0.0, 0.0});
-  node.declare_parameter("gate_odom", 1.0e5);   // 実質無効（χ²(2) の 99% は 9.21）
-  node.declare_parameter("odom_timeout_init", 0.2);
-  node.declare_parameter("odom_delay", 0.0);
-  node.declare_parameter("odom_scale", std::vector<double>{1.0, 1.0});
-  node.declare_parameter("odom_stamp_mode", "stamp");
-  node.declare_parameter("odom_stamp_auto_threshold", 0.1);
+/// Eigen のベクトル → ROS のパラメータの double の配列
+template<class Derived>
+std::vector<double> toStdVector(const Eigen::MatrixBase<Derived> & v)
+{
+  return std::vector<double>(v.derived().data(), v.derived().data() + v.size());
 }
 
-EkfConfig loadEkfConfig(rclcpp::Node & node)
+/// 名前を変えたパラメータ（古い名前, 新しい名前）。2026-11-13
+const std::vector<std::pair<std::string, std::string>> kRenamedParameters = {
+  {"predict_rate", "publish_rate"},
+  {"accel_noise_tau", "odom_noise_tau"},
+  {"gate_ndt", "ndt_gate"},
+  {"gate_odom", "odom_gate"},
+};
+
+}  // namespace
+
+void declareEkfParameters(rclcpp::Node & node)
+{
+  const EkfParams d;
+  node.declare_parameter("use_odom", d.use_odom);
+  node.declare_parameter("publish_rate", d.publish_rate);
+  node.declare_parameter("tf_future_steps", d.tf_future_steps);
+  node.declare_parameter("tf_past_steps", d.tf_past_steps);
+  node.declare_parameter("history_length", d.history_length);
+  node.declare_parameter("map_frame_id", d.map_frame_id);
+  node.declare_parameter("base_frame_id", d.base_frame_id);
+  node.declare_parameter("lidar_frame_id", d.lidar_frame_id);
+  node.declare_parameter("Q", toStdVector(d.core.q));
+  node.declare_parameter("P_init", toStdVector(d.core.p_init));
+  node.declare_parameter("max_predict_dt", d.core.max_predict_dt);
+
+  // NDT の観測
+  node.declare_parameter("R_ndt", toStdVector(d.ndt.r));
+  node.declare_parameter("ndt_gate", d.ndt.gate_threshold);
+  node.declare_parameter("ndt_delay", d.ndt_delay);
+
+  // オドメトリの観測（use_odom: true のみ）
+  node.declare_parameter("R_odom", toStdVector(d.odom.r));
+  node.declare_parameter("odom_noise_alpha", toStdVector(d.odom.alpha));
+  node.declare_parameter("odom_noise_tau", toStdVector(d.odom.tau));
+  node.declare_parameter("odom_gate", d.odom.gate_threshold);
+  node.declare_parameter("odom_timeout_init", d.odom.timeout_init);
+  node.declare_parameter("odom_delay", d.odom_delay);
+  node.declare_parameter("odom_scale", toStdVector(d.odom_scale));
+  node.declare_parameter("odom_stamp_mode", d.odom_stamp_mode);
+  node.declare_parameter("odom_stamp_auto_threshold", d.odom_stamp_auto_threshold);
+}
+
+EkfParams loadEkfParams(rclcpp::Node & node)
 {
   const rclcpp::Logger logger = node.get_logger();
-  EkfConfig cfg;
+  const EkfParams defaults;
+  EkfParams params;
+
+  // 古い名前は宣言していないので、渡されても読まれない（既定値になる）。気づけるように WARN を出す
+  const auto & overrides = node.get_node_parameters_interface()->get_parameter_overrides();
+  for (const auto & [old_name, new_name] : kRenamedParameters) {
+    if (overrides.count(old_name) > 0) {
+      RCLCPP_WARN(
+        logger, "Parameter \"%s\" was renamed to \"%s\". The old name is ignored.",
+        old_name.c_str(), new_name.c_str());
+    }
+  }
 
   // ベクトルパラメータ。要素数が合わなければ既定値のまま WARN を出す。
   const auto load = [&](const std::string & name, std::size_t n, std::vector<double> & out) {
@@ -61,77 +90,85 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
       return true;
     };
 
-  node.get_parameter("use_odom", cfg.use_odom);
-  node.get_parameter("predict_rate", cfg.predict_rate);
-  if (!(cfg.predict_rate > 0.0)) {
-    RCLCPP_WARN(logger, "predict_rate must be positive (got %lf). Using 50.0.", cfg.predict_rate);
-    cfg.predict_rate = 50.0;
+  node.get_parameter("use_odom", params.use_odom);
+  node.get_parameter("publish_rate", params.publish_rate);
+  if (!(params.publish_rate > 0.0)) {
+    RCLCPP_WARN(
+      logger, "publish_rate must be positive (got %lf). Using %lf.",
+      params.publish_rate, defaults.publish_rate);
+    params.publish_rate = defaults.publish_rate;
   }
-  node.get_parameter("history_length", cfg.history_length);
-  if (!(cfg.history_length > 0.0)) {
-    RCLCPP_WARN(logger, "history_length must be positive (got %lf). Using 1.0.", cfg.history_length);
-    cfg.history_length = 1.0;
+  node.get_parameter("history_length", params.history_length);
+  if (!(params.history_length > 0.0)) {
+    RCLCPP_WARN(
+      logger, "history_length must be positive (got %lf). Using %lf.",
+      params.history_length, defaults.history_length);
+    params.history_length = defaults.history_length;
   }
-  node.get_parameter("tf_future_steps", cfg.tf_future_steps);
-  node.get_parameter("tf_past_steps", cfg.tf_past_steps);
-  if (cfg.tf_future_steps < 0) {
-    RCLCPP_WARN(logger, "tf_future_steps must be >= 0 (got %d). Using 0.", cfg.tf_future_steps);
-    cfg.tf_future_steps = 0;
+  node.get_parameter("tf_future_steps", params.tf_future_steps);
+  node.get_parameter("tf_past_steps", params.tf_past_steps);
+  if (params.tf_future_steps < 0) {
+    RCLCPP_WARN(logger, "tf_future_steps must be >= 0 (got %d). Using 0.", params.tf_future_steps);
+    params.tf_future_steps = 0;
   }
-  if (cfg.tf_past_steps < 0) {
-    RCLCPP_WARN(logger, "tf_past_steps must be >= 0 (got %d). Using 0.", cfg.tf_past_steps);
-    cfg.tf_past_steps = 0;
+  if (params.tf_past_steps < 0) {
+    RCLCPP_WARN(logger, "tf_past_steps must be >= 0 (got %d). Using 0.", params.tf_past_steps);
+    params.tf_past_steps = 0;
   }
-  if (cfg.tf_future_steps == 0 && cfg.tf_past_steps > 0) {
+  if (params.tf_future_steps == 0 && params.tf_past_steps > 0) {
     RCLCPP_WARN(logger, "tf_past_steps is used only when tf_future_steps >= 1. Ignoring it.");
-    cfg.tf_past_steps = 0;
+    params.tf_past_steps = 0;
   }
   // 送り直す刻みは履歴の中に収める（起点より古い刻みの状態は求められない）
-  const int max_past = std::max(0, static_cast<int>(std::ceil(cfg.history_length * cfg.predict_rate)) - 1);
-  if (cfg.tf_past_steps > max_past) {
+  const int max_past =
+    std::max(0, static_cast<int>(std::ceil(params.history_length * params.publish_rate)) - 1);
+  if (params.tf_past_steps > max_past) {
     RCLCPP_WARN(
       logger, "tf_past_steps must be shorter than history_length (got %d). Using %d.",
-      cfg.tf_past_steps, max_past);
-    cfg.tf_past_steps = max_past;
+      params.tf_past_steps, max_past);
+    params.tf_past_steps = max_past;
   }
   // 1 つの /tf のメッセージを LAN の 1 フレーム（1500 B、TF 1 個は約 100 B）に収める目安
-  if (cfg.tf_future_steps + cfg.tf_past_steps > 10) {
+  if (params.tf_future_steps + params.tf_past_steps > 10) {
     RCLCPP_WARN(
       logger, "tf_future_steps + tf_past_steps = %d transforms per message. "
-      "More than 10 may not fit in one Ethernet frame.", cfg.tf_future_steps + cfg.tf_past_steps);
+      "More than 10 may not fit in one Ethernet frame.",
+      params.tf_future_steps + params.tf_past_steps);
   }
-  node.get_parameter("map_frame_id", cfg.map_frame_id);
-  node.get_parameter("base_frame_id", cfg.base_frame_id);
-  node.get_parameter("lidar_frame_id", cfg.lidar_frame_id);
+  node.get_parameter("map_frame_id", params.map_frame_id);
+  node.get_parameter("base_frame_id", params.base_frame_id);
+  node.get_parameter("lidar_frame_id", params.lidar_frame_id);
 
   std::vector<double> q, p_init, r_ndt, r_odom, odom_alpha, odom_tau, odom_scale;
   // Q と P_init は状態と同じ
   // [x, y, z, roll, pitch, yaw, v_xy, v_z, omega_roll, omega_pitch, omega_yaw] の 11 要素
-  if (load("Q", EkfCore::kN, q)) {
-    cfg.core.q = Eigen::Map<const EkfCore::StateVector>(q.data());
+  EkfCore::Params & core = params.core;
+  if (load("Q", EkfCore::kStateSize, q)) {
+    core.q = Eigen::Map<const EkfCore::StateVector>(q.data());
   }
-  if (load("P_init", EkfCore::kN, p_init)) {
-    cfg.core.p_init = Eigen::Map<const EkfCore::StateVector>(p_init.data());
+  if (load("P_init", EkfCore::kStateSize, p_init)) {
+    core.p_init = Eigen::Map<const EkfCore::StateVector>(p_init.data());
   }
-  node.get_parameter("max_predict_dt", cfg.core.max_predict_dt);
+  node.get_parameter("max_predict_dt", core.max_predict_dt);
 
-  NdtModel::Params & nprm = cfg.ndt;
+  NdtModel::Params & ndt = params.ndt;
   if (load("R_ndt", 6, r_ndt)) {
-    nprm.r = Eigen::Map<const NdtModel::Vector6d>(r_ndt.data());
+    ndt.r = Eigen::Map<const Vector6d>(r_ndt.data());
   }
-  node.get_parameter("gate_ndt", nprm.gate);
-  node.get_parameter("ndt_delay", cfg.ndt_delay);
-  if (!(cfg.ndt_delay >= 0.0) || cfg.ndt_delay >= cfg.history_length) {
+  node.get_parameter("ndt_gate", ndt.gate_threshold);
+  node.get_parameter("ndt_delay", params.ndt_delay);
+  if (!(params.ndt_delay >= 0.0) || params.ndt_delay >= params.history_length) {
     RCLCPP_WARN(
-      logger, "ndt_delay must be in [0, history_length) (got %lf). Using 0.0.", cfg.ndt_delay);
-    cfg.ndt_delay = 0.0;
+      logger, "ndt_delay must be in [0, history_length) (got %lf). Using %lf.",
+      params.ndt_delay, defaults.ndt_delay);
+    params.ndt_delay = defaults.ndt_delay;
   }
 
-  OdomModel::Params & oprm = cfg.odom;
+  OdomModel::Params & odom = params.odom;
   if (load("R_odom", 2, r_odom)) {
     const Eigen::Map<const Eigen::Vector2d> r(r_odom.data());
     if ((r.array() > 0.0).all()) {
-      oprm.r = r;
+      odom.r = r;
     } else {
       RCLCPP_WARN(logger, "R_odom must be positive (got [%g, %g]). Using default.", r(0), r(1));
     }
@@ -139,61 +176,65 @@ EkfConfig loadEkfConfig(rclcpp::Node & node)
   if (load("odom_noise_alpha", 4, odom_alpha)) {
     const Eigen::Map<const Eigen::Vector4d> a(odom_alpha.data());
     if ((a.array() >= 0.0).all()) {
-      oprm.alpha = a;
+      odom.alpha = a;
     } else {
       RCLCPP_WARN(logger, "odom_noise_alpha must not be negative. Using default.");
     }
   }
-  if (load("accel_noise_tau", 2, odom_tau)) {
-    oprm.tau = Eigen::Map<const Eigen::Vector2d>(odom_tau.data());
+  if (load("odom_noise_tau", 2, odom_tau)) {
+    odom.tau = Eigen::Map<const Eigen::Vector2d>(odom_tau.data());
   }
-  node.get_parameter("gate_odom", oprm.gate);
-  node.get_parameter("odom_timeout_init", oprm.timeout_init);
-  node.get_parameter("odom_delay", cfg.odom_delay);
-  if (!(cfg.odom_delay >= 0.0) || cfg.odom_delay >= cfg.history_length) {
+  node.get_parameter("odom_gate", odom.gate_threshold);
+  node.get_parameter("odom_timeout_init", odom.timeout_init);
+  node.get_parameter("odom_delay", params.odom_delay);
+  if (!(params.odom_delay >= 0.0) || params.odom_delay >= params.history_length) {
     RCLCPP_WARN(
-      logger, "odom_delay must be in [0, history_length) (got %lf). Using 0.0.", cfg.odom_delay);
-    cfg.odom_delay = 0.0;
+      logger, "odom_delay must be in [0, history_length) (got %lf). Using %lf.",
+      params.odom_delay, defaults.odom_delay);
+    params.odom_delay = defaults.odom_delay;
   }
   if (load("odom_scale", 2, odom_scale)) {
-    cfg.odom_scale = Eigen::Map<const Eigen::Vector2d>(odom_scale.data());
+    params.odom_scale = Eigen::Map<const Eigen::Vector2d>(odom_scale.data());
   }
-  node.get_parameter("odom_stamp_mode", cfg.odom_stamp_mode);
-  if (cfg.odom_stamp_mode != "stamp" && cfg.odom_stamp_mode != "receipt" && cfg.odom_stamp_mode != "auto") {
+  node.get_parameter("odom_stamp_mode", params.odom_stamp_mode);
+  if (params.odom_stamp_mode != "stamp" && params.odom_stamp_mode != "receipt" &&
+    params.odom_stamp_mode != "auto")
+  {
     RCLCPP_WARN(
-      logger, "odom_stamp_mode must be stamp, receipt or auto (got \"%s\"). Using stamp.",
-      cfg.odom_stamp_mode.c_str());
-    cfg.odom_stamp_mode = "stamp";
+      logger, "odom_stamp_mode must be stamp, receipt or auto (got \"%s\"). Using %s.",
+      params.odom_stamp_mode.c_str(), defaults.odom_stamp_mode.c_str());
+    params.odom_stamp_mode = defaults.odom_stamp_mode;
   }
-  node.get_parameter("odom_stamp_auto_threshold", cfg.odom_stamp_auto_threshold);
+  node.get_parameter("odom_stamp_auto_threshold", params.odom_stamp_auto_threshold);
 
-  return cfg;
+  return params;
 }
 
-void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
+void logEkfParams(const rclcpp::Logger & logger, const EkfParams & params)
 {
-  const EkfCore::Params & cprm = cfg.core;
-  const NdtModel::Params & nprm = cfg.ndt;
+  const EkfCore::Params & core = params.core;
+  const NdtModel::Params & ndt = params.ndt;
   RCLCPP_INFO(
     logger, "ekf model: %s 11-state EKF "
     "[x,y,z,roll,pitch,yaw,v_xy,v_z,omega_roll,omega_pitch,omega_yaw]%s",
-    cfg.base_frame_id.c_str(),
-    cfg.use_odom ? " + odom observation [v_xy,omega_yaw]" : " (odom unused)");
+    params.base_frame_id.c_str(),
+    params.use_odom ? " + odom observation [v_xy,omega_yaw]" : " (odom unused)");
   RCLCPP_INFO(
     logger, "ekf frames: %s -> %s (lidar: %s)",
-    cfg.map_frame_id.c_str(), cfg.base_frame_id.c_str(), cfg.lidar_frame_id.c_str());
+    params.map_frame_id.c_str(), params.base_frame_id.c_str(), params.lidar_frame_id.c_str());
   RCLCPP_INFO(
-    logger, "ekf publish: %lf Hz (predicted to the current time), history_length: %lf s",
-    cfg.predict_rate, cfg.history_length);
-  if (cfg.tf_future_steps > 0) {
+    logger, "ekf publish_rate: %lf Hz (predicted to the current time), history_length: %lf s",
+    params.publish_rate, params.history_length);
+  if (params.tf_future_steps > 0) {
     RCLCPP_INFO(
       logger, "ekf TF on the %lf s grid: %d future step(s), %d past step(s) resent",
-      1.0 / cfg.predict_rate, cfg.tf_future_steps, cfg.tf_past_steps);
+      1.0 / params.publish_rate, params.tf_future_steps, params.tf_past_steps);
   }
   RCLCPP_INFO(
-    logger, "ekf gate_ndt: %lf (NDT observed as the base pose, 6 components at once)", nprm.gate);
-  RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", cprm.max_predict_dt);
-  RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", cfg.ndt_delay);
+    logger, "ekf ndt_gate: %lf (NDT observed as the base pose, 6 components at once)",
+    ndt.gate_threshold);
+  RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", core.max_predict_dt);
+  RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", params.ndt_delay);
   const auto join = [](const EkfCore::StateVector & v) {
       std::string out;
       for (int i = 0; i < v.size(); ++i) {
@@ -205,39 +246,26 @@ void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg)
     };
   RCLCPP_INFO(
     logger, "ekf Q(x,y,z,roll,pitch,yaw,v_xy,v_z,omega_roll,omega_pitch,omega_yaw): [%s]",
-    join(cprm.q).c_str());
+    join(core.q).c_str());
   RCLCPP_INFO(
     logger, "ekf R_ndt: [%g, %g, %g, %g, %g, %g]",
-    nprm.r(0), nprm.r(1), nprm.r(2), nprm.r(3), nprm.r(4), nprm.r(5));
+    ndt.r(0), ndt.r(1), ndt.r(2), ndt.r(3), ndt.r(4), ndt.r(5));
   RCLCPP_INFO(
     logger, "ekf P_init(x,y,z,roll,pitch,yaw,v_xy,v_z,omega_roll,omega_pitch,omega_yaw): [%s]",
-    join(cprm.p_init).c_str());
-  if (cfg.use_odom) {
-    const OdomModel::Params & oprm = cfg.odom;
+    join(core.p_init).c_str());
+  if (params.use_odom) {
+    const OdomModel::Params & odom = params.odom;
     RCLCPP_INFO(
-      logger, "ekf R_odom: [%g, %g], odom_noise_alpha: [%g, %g, %g, %g], accel_noise_tau: [%g, %g], "
-      "gate_odom: %lf, odom_timeout_init: %lf",
-      oprm.r(0), oprm.r(1), oprm.alpha(0), oprm.alpha(1), oprm.alpha(2), oprm.alpha(3),
-      oprm.tau(0), oprm.tau(1), oprm.gate, oprm.timeout_init);
+      logger, "ekf R_odom: [%g, %g], odom_noise_alpha: [%g, %g, %g, %g], odom_noise_tau: [%g, %g], "
+      "odom_gate: %lf, odom_timeout_init: %lf",
+      odom.r(0), odom.r(1), odom.alpha(0), odom.alpha(1), odom.alpha(2), odom.alpha(3),
+      odom.tau(0), odom.tau(1), odom.gate_threshold, odom.timeout_init);
     RCLCPP_INFO(
-      logger, "ekf odom_delay: %lf s, odom_scale: [%g, %g], odom_stamp_mode: %s (odom_stamp_auto_threshold %g s)",
-      cfg.odom_delay, cfg.odom_scale(0), cfg.odom_scale(1), cfg.odom_stamp_mode.c_str(),
-      cfg.odom_stamp_auto_threshold);
+      logger, "ekf odom_delay: %lf s, odom_scale: [%g, %g], odom_stamp_mode: %s "
+      "(odom_stamp_auto_threshold %g s)",
+      params.odom_delay, params.odom_scale(0), params.odom_scale(1),
+      params.odom_stamp_mode.c_str(), params.odom_stamp_auto_threshold);
   }
-}
-
-EkfFilter createFilter(const EkfConfig & cfg, const Eigen::Affine3d & mount)
-{
-  // 観測モデルは作るときに core にゲートを確保するので、LaggedEkf より先に作る
-  EkfCore core(cfg.core);
-  EkfFilter f;
-  f.ndt = std::make_shared<NdtModel>(cfg.ndt, mount, core);
-  if (cfg.use_odom) {
-    f.odom = std::make_shared<OdomModel>(cfg.odom, core);
-    f.odom_noise = std::make_shared<OdomNoise>(cfg.odom);
-  }
-  f.lagged = std::make_unique<LaggedEkf>(core, cfg.history_length);
-  return f;
 }
 
 }  // namespace ekf_localizer

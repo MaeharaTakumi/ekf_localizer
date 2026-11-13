@@ -6,33 +6,13 @@
 namespace ekf_localizer
 {
 
-double normalizeAngle(double angle)
-{
-  return std::atan2(std::sin(angle), std::cos(angle));
-}
-
-Eigen::Vector3d rpyFromRotation(const Eigen::Matrix3d & R)
-{
-  return Eigen::Vector3d(
-    std::atan2(R(2, 1), R(2, 2)),
-    std::asin(std::max(-1.0, std::min(1.0, -R(2, 0)))),
-    std::atan2(R(1, 0), R(0, 0)));
-}
-
-Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw)
-{
-  return (Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
-         Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
-         Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX())).toRotationMatrix();
-}
-
 EkfCore::EkfCore()
 : EkfCore(Params())
 {
 }
 
-EkfCore::EkfCore(const Params & p)
-: prm_(p)
+EkfCore::EkfCore(const Params & params)
+: params_(params)
 {
 }
 
@@ -42,10 +22,7 @@ EkfCore::EkfCore(const Params & p)
 
 Eigen::Affine3d EkfCore::poseFromState(const StateVector & x)
 {
-  Eigen::Affine3d T = Eigen::Affine3d::Identity();
-  T.linear() = rotationFromRpy(x(kRoll), x(kPitch), x(kYaw));
-  T.translation() = x.head<3>();
-  return T;
+  return poseFromVector(x.head<6>());
 }
 
 void EkfCore::wrapAngles(StateVector & x)
@@ -106,12 +83,12 @@ EkfCore::StateMatrix EkfCore::transitionJacobian(const StateVector & x, double d
 // 初期化・予測
 // ---------------------------------------------------------------------------
 
-void EkfCore::initialize(const StateVector & x0, double stamp)
+void EkfCore::initialize(const StateVector & x0, double t)
 {
   x_ = x0;
-  P_ = prm_.p_init.asDiagonal();
+  P_ = params_.p_init.asDiagonal();
   std::fill(gates_.begin(), gates_.end(), GateState());
-  t_last_ = stamp;
+  time_ = t;
   initialized_ = true;
 }
 
@@ -121,20 +98,20 @@ void EkfCore::reset()
   std::fill(gates_.begin(), gates_.end(), GateState());
 }
 
-void EkfCore::predictTo(double stamp)
+void EkfCore::predictTo(double t)
 {
   if (!initialized_) {return;}
 
-  // dt が max_predict_dt を超える場合は予測だけ切り詰める（t_last_ は stamp まで進める）
-  const double dt = std::min(stamp - t_last_, prm_.max_predict_dt);
+  // dt が max_predict_dt を超える場合は予測だけ切り詰める（状態の時刻 time_ は t まで進める）
+  const double dt = std::min(t - time_, params_.max_predict_dt);
   if (dt <= 0.0) {return;}
 
   const StateMatrix F = transitionJacobian(x_, dt);
   x_ = propagate(x_, dt);
 
-  P_ = F * P_ * F.transpose() + StateMatrix(prm_.q.asDiagonal()) * dt;
+  P_ = F * P_ * F.transpose() + StateMatrix(params_.q.asDiagonal()) * dt;
 
-  t_last_ = stamp;
+  time_ = t;
 }
 
 int EkfCore::addGates(int n)

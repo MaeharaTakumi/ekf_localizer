@@ -9,7 +9,7 @@ namespace ekf_localizer
 
 LaggedEkf::LaggedEkf(const EkfCore & core, double history_length)
 : anchor_(core),
-  anchor_stamp_(-std::numeric_limits<double>::infinity()),
+  anchor_time_(-std::numeric_limits<double>::infinity()),
   history_length_(history_length)
 {
 }
@@ -30,7 +30,7 @@ EkfCore LaggedEkf::at(double t) const
 {
   const auto it = std::upper_bound(
     history_.begin(), history_.end(), t,
-    [](double t, const Entry & e) {return t < e.m->stamp;});
+    [](double t, const Entry & e) {return t < e.m->time;});
   EkfCore ekf = (it == history_.begin()) ? anchor_ : std::prev(it)->state;
   ekf.predictTo(t);
   return ekf;
@@ -51,24 +51,24 @@ void LaggedEkf::reset()
   EkfCore ekf = current();
   ekf.reset();
   anchor_ = ekf;
-  anchor_stamp_ = -std::numeric_limits<double>::infinity();
+  anchor_time_ = -std::numeric_limits<double>::infinity();
   history_.clear();
 }
 
-LaggedEkf::Result LaggedEkf::add(const MeasurementPtr & m)
+LaggedEkf::AddResult LaggedEkf::add(const MeasurementPtr & m)
 {
-  Result res;
-  if (m->stamp < anchor_stamp_) {return res;}
+  AddResult res;
+  if (m->time < anchor_time_) {return res;}
 
   // 同じ時刻の観測の後ろに入れる（届いた順を保つ）
   const auto it = std::upper_bound(
-    history_.begin(), history_.end(), m->stamp,
-    [](double t, const Entry & e) {return t < e.m->stamp;});
+    history_.begin(), history_.end(), m->time,
+    [](double t, const Entry & e) {return t < e.m->time;});
   const std::size_t pos = static_cast<std::size_t>(it - history_.begin());
 
   // 直前の状態から m を適用する
   Entry entry{m, (pos == 0) ? anchor_ : history_[pos - 1].state};
-  res.outcome = applyMeasurement(entry.state, m);
+  res.apply_result = applyMeasurement(entry.state, m);
   history_.insert(it, std::move(entry));
 
   // 後続の観測を時刻順に適用し直す
@@ -85,10 +85,10 @@ LaggedEkf::Result LaggedEkf::add(const MeasurementPtr & m)
 void LaggedEkf::prune()
 {
   if (history_.empty()) {return;}
-  const double oldest_kept = history_.back().m->stamp - history_length_;
-  while (history_.size() > 1 && history_.front().m->stamp < oldest_kept) {
+  const double oldest_kept = history_.back().m->time - history_length_;
+  while (history_.size() > 1 && history_.front().m->time < oldest_kept) {
     anchor_ = std::move(history_.front().state);
-    anchor_stamp_ = history_.front().m->stamp;
+    anchor_time_ = history_.front().m->time;
     history_.pop_front();
   }
 }

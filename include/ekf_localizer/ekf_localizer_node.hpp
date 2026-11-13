@@ -11,6 +11,7 @@
 #include "tf2_ros/transform_broadcaster.h"
 #include "tf2_ros/transform_listener.h"
 
+#include "ekf_localizer/ekf_filter.hpp"
 #include "ekf_localizer/ekf_params.hpp"
 
 namespace ekf_localizer
@@ -20,7 +21,7 @@ namespace ekf_localizer
 ///
 ///   入力  ndt_pose（map → LiDAR、stamp は点群の取得時刻）、odom（v, omega）、initialpose（リセット）
 ///         トピック名を変えるときは remap する（localization_bringup の launch は odom を /wheelchair/odom にする）
-///   出力  predict_rate の周期で、最新の状態を現在時刻まで予測した TF map → base、ekf_pose（map → LiDAR）、
+///   出力  publish_rate の周期で、最新の状態を現在時刻まで予測した TF map → base、ekf_pose（map → LiDAR）、
 ///         ekf_odom（map → base、v, omega）。NDT は点群の stamp の時刻の TF を初期値にし、MATLAB などは
 ///         最新の TF（今の姿勢）と点群の stamp の時刻の TF（点群の座標変換）を引く。
 ///         tf_future_steps >= 1 なら TF は周期の刻みの stamp で、今より先の刻みも送る（購読側が点群の stamp の
@@ -43,18 +44,16 @@ private:
   void timerCallback();
   /// 取付 base → LiDAR を TF から読んで EKF を作る（タイマーから呼ぶ）。作れたら true
   bool tryCreateFilter();
-  /// 観測の時刻 [s]（メッセージの stamp − delay）
-  double measurementTime(const builtin_interfaces::msg::Time & stamp, double delay);
   /// オドメトリの時刻：odom_stamp_mode で、stamp か、このノードが受け取った時刻（sim time で /clock を受け取る前は stamp）
   builtin_interfaces::msg::Time odomStamp(const builtin_interfaces::msg::Time & stamp);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
   /// ekf の推定値を stamp の時刻として ekf_pose・ekf_odom に配信する（TF は timerCallback が送る）
-  void publish(const EkfCore & ekf, const rclcpp::Time & stamp);
+  void publishPoseAndOdom(const EkfCore & ekf, const rclcpp::Time & stamp);
   /// tf_future_steps >= 1 のとき：時刻 t_ns の前後の刻みの TF map → base をまとめて送る
   void publishTfGrid(int64_t t_ns);
   /// TF map → base
-  geometry_msgs::msg::TransformStamped tfMsg(const EkfCore & ekf, const rclcpp::Time & stamp) const;
+  geometry_msgs::msg::TransformStamped baseTransformMsg(const EkfCore & ekf, const rclcpp::Time & stamp) const;
   /// map → base の姿勢と共分散（base の 6x6）
   geometry_msgs::msg::PoseWithCovarianceStamped basePoseMsg(
     const EkfCore & ekf, const rclcpp::Time & stamp) const;
@@ -62,14 +61,14 @@ private:
   geometry_msgs::msg::PoseWithCovarianceStamped lidarPoseMsg(
     const EkfCore & ekf, const rclcpp::Time & stamp) const;
 
-  EkfConfig cfg_;
-  /// EKF 一式（filter_.lagged は取付が TF から読めるまで null）
+  EkfParams params_;
+  /// EKF 一式（filter_.ekf は取付が TF から読めるまで null）
   EkfFilter filter_;
   /// 観測モデルごとの、「古すぎる」WARN を最後に出した時刻（5 秒に 1 回にする）
   std::map<const ObservationModel *, rclcpp::Time> too_old_warned_;
   /// 最後に配信した時刻（同じ時刻で 2 回出さない）
   rclcpp::Time last_publish_stamp_;
-  /// タイマーの周期と TF の刻みの幅 [ns]（1 / predict_rate）
+  /// タイマーの周期と TF の刻みの幅 [ns]（1 / publish_rate）
   int64_t period_ns_{20000000};
   /// odom_stamp_mode: auto のログ用：受け取った数、受け取った時刻を使った数、|受け取った時刻 − stamp| の最大 [s]
   int odom_count_{0};

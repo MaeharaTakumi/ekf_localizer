@@ -9,7 +9,7 @@ flowchart LR
   odom["/odom"] --> cbO["odomReceived"]
   ndt["/ndt_pose"] --> cbN["ndtPoseReceived"]
   ip["/initialpose"] --> cbI["initialPoseReceived"]
-  timer["タイマー<br/>predict_rate（50 Hz）"] --> cbT["timerCallback"]
+  timer["タイマー<br/>publish_rate（50 Hz）"] --> cbT["timerCallback"]
 
   subgraph node["EkfLocalizer（ROS ノード、シングルスレッド）"]
     cbO --> om["OdomModel<br/>メッセージ → 観測"]
@@ -37,6 +37,11 @@ flowchart LR
 | `NdtModel` | `src/ndt_model.cpp` | NDT の解の観測モデル（LiDAR の姿勢を base の姿勢に直して初期化・6 成分を 1 回で更新） |
 | `OdomModel` | `src/odom_model.cpp` | オドメトリの観測モデル（`use_odom: true` のときだけ作る） |
 | `OdomNoise` | `src/odom_model.cpp` | オドメトリの観測ノイズ R の計算（速さ・加速度に応じた分。直前の速度を覚えるので観測モデルとは別。`use_odom: true` のときだけ作る） |
+| `EkfFilter`・`createFilter` | `src/ekf_filter.cpp` | EKF 一式（`LaggedEkf` と観測モデル・`OdomNoise`）をパラメータと取付から組み立てる |
+| `EkfParams` | `src/ekf_params.cpp` | ノードのパラメータ一式。既定値は構造体の初期値で、宣言・読み込み・ログもここ |
+| （関数） | `src/pose_utils.cpp` | 角度の正規化、RPY と回転行列、姿勢の行列と [x, y, z, roll, pitch, yaw] の変換 |
+
+`EkfLocalizer`・`EkfFilter`・`EkfParams` はノードの実行ファイル、ほかは ROS に依存しないライブラリ `ekf_core`（ノードとテストで共用）に入ります。
 
 ### クラスの関係
 
@@ -47,18 +52,18 @@ classDiagram
   class EkfLocalizer {
     -EkfFilter filter_
     -addMeasurement(MeasurementPtr)
-    -publish(EkfCore, stamp)
+    -publishPoseAndOdom(EkfCore, stamp)
   }
   class EkfFilter {
     +shared_ptr~NdtModel~ ndt
     +shared_ptr~OdomModel~ odom
     +shared_ptr~OdomNoise~ odom_noise
-    +unique_ptr~LaggedEkf~ lagged
+    +unique_ptr~LaggedEkf~ ekf
   }
   class LaggedEkf {
     -EkfCore anchor_
     -deque~Entry~ history_
-    +add(MeasurementPtr) Result
+    +add(MeasurementPtr) AddResult
     +reset()
     +current() EkfCore
     +predicted(t) EkfCore
@@ -75,7 +80,7 @@ classDiagram
   }
   class Measurement {
     +shared_ptr~ObservationModel~ model
-    +stamp
+    +time
     +z
     +r
   }
@@ -86,16 +91,17 @@ classDiagram
     +aidsInitialization() bool
     +aidInitialization(EkfCore, Measurement, t) bool
     +update(EkfCore, Measurement) StageResult[]
+    #gatedUpdate(EkfCore, name, gate_index, y, H, R, γ) StageResult
   }
   class NdtModel {
-    -Params prm_
+    -Params params_
     -T_BL mount_
     +measurement(z, t) MeasurementPtr
     +lidarPose(x)
     +lidarPoseJacobian(x)
   }
   class OdomModel {
-    -Params prm_
+    -Params params_
     +measurement(v, omega, r, t) MeasurementPtr
   }
 
@@ -127,7 +133,7 @@ classDiagram
 ### センサを足すとき
 
 1. `ObservationModel` を継承した観測モデルを 1 つ書く。
-   - `update()`：y, H, R, γ を組み立てて `EkfCore::kalmanUpdate` を呼ぶ。更新を段に分けてもよい
+   - `update()`：y, H, R, γ を組み立てて `gatedUpdate()`（ゲートの状態を書き換えて `EkfCore::kalmanUpdate` を呼ぶ）を呼ぶ。更新を段に分けてもよい
    - 初期化できる観測なら `initialState()`、初期化を補う観測なら `aidsInitialization()`・`aidInitialization()`
    - ゲートの状態はコンストラクタで `EkfCore::addGates()` を呼んで確保する（履歴と一緒に巻き戻すため）
 2. ノードに、メッセージから観測を作って `addMeasurement()` に渡すコールバックを書く。
@@ -256,7 +262,7 @@ flowchart TD
   | h(x) | 状態 x から予測した観測値 |
   | H | h のヤコビアン（∂h/∂x） |
   | R | 観測ノイズ（分散） |
-  | γ | ゲート（`gate_ndt`・`gate_odom`） |
+  | γ | ゲート（`ndt_gate`・`odom_gate`） |
 
   1. 残差：y = z − h(x)（角度の成分は −π〜π に収める）
   2. 残差の共分散：S = H P Hᵀ + R
@@ -275,7 +281,7 @@ flowchart TD
 | 観測ノイズ R | `R_ndt`（LiDAR）を base の姿勢に直したもの J R_ndt Jᵀ（相関込みの 6×6） | `R_odom` と速さ・加速度から計算した値 |
 | 遅れ t_d | `ndt_delay`（既定 0） | `odom_delay` |
 | 更新の分け方 | 6 成分をまとめて 1 回 | v_xy, omega_yaw をまとめて 1 回 |
-| ゲート | `gate_ndt` | `gate_odom` |
+| ゲート | `ndt_gate` | `odom_gate` |
 | 棄却が続いたとき | 何もしない（WARN だけ） | 何もしない |
 | 未初期化のとき | この値で初期化する | 値を覚えておく（初期化で使う） |
 
@@ -286,8 +292,8 @@ flowchart TD
   速度 5 つは 0 から始めます。ただし `use_odom: true` で、覚えているオドメトリの時刻 t_o が |t_z − t_o| ≤ `odom_timeout_init`（0.2 秒）なら、
   v_xy = v_o、omega_yaw = omega_o とし、その分散を観測ノイズの値にします（`EKF initialized by NDT (v_xy, omega_yaw = ... from Odometry)`）。
 - **base の姿勢に直した更新**：観測には LiDAR の姿勢と `R_ndt` をそのまま持ち、更新のたびに次のように直して、
-  共通の流れの判定・更新を 6 成分まとめて 1 回で行います（ゲート `gate_ndt`。ノードの既定は 1.0e5 で実質無効。
-  `NdtModel::Params` の既定 16.81 = χ²(6) の 99% はテストで使う）。
+  共通の流れの判定・更新を 6 成分まとめて 1 回で行います（ゲート `ndt_gate`。既定は 1.0e5 で実質無効。
+  テストは χ²(6) の 99% の 16.81 にする）。
   - 観測値：z_B = T_L · T_BL⁻¹ を [x, y, z, roll, pitch, yaw] にしたもの（厳密）。h(x) は状態の先頭 6 成分、H = [I 0]
   - 観測ノイズ：R = J diag(`R_ndt`) Jᵀ。J は z_L → z_B のヤコビアン（中心差分）。LiDAR は base から離れている（高さ約 1.1 m）ので、
     LiDAR の roll・pitch の誤差が base の x, y に回り、位置と姿勢の相関が入る
@@ -296,7 +302,7 @@ flowchart TD
 
 ### オドメトリだけの内容
 
-- **観測ノイズ**：`OdomNoise` が R_v = `R_odom[0]` + a₀v² + a₁ω² + (τ₀·dv/dt)²、R_omega = `R_odom[1]` + a₂v² + a₃ω² + (τ₁·dω/dt)² を計算します（a は `odom_noise_alpha`、τ は `accel_noise_tau`。加速度は直前のメッセージとの差）。メッセージの共分散（`twist.covariance`）は使いません。
+- **観測ノイズ**：`OdomNoise` が R_v = `R_odom[0]` + a₀v² + a₁ω² + (τ₀·dv/dt)²、R_omega = `R_odom[1]` + a₂v² + a₃ω² + (τ₁·dω/dt)² を計算します（a は `odom_noise_alpha`、τ は `odom_noise_tau`。加速度は直前のメッセージとの差）。メッセージの共分散（`twist.covariance`）は使いません。
 
 ## 3. 巻き戻しと再計算（`LaggedEkf`）
 
@@ -329,7 +335,7 @@ sequenceDiagram
 
 ## 4. 配信
 
-`predict_rate`（50 Hz）の周期で、最新の状態を現在時刻まで予測した値を配信します（下の図）。
+`publish_rate`（50 Hz）の周期で、最新の状態を現在時刻まで予測した値を配信します（下の図）。
 NDT の初期値と MATLAB の点群の座標変換は、この `/tf` を点群の stamp の時刻で引きます（tf2 が前後の 2 つを補間する）。
 引いた値は、その点群の NDT を入れる前の予測値（事前推定値）です。MATLAB は最新の `/tf` を今の姿勢（後輪間中心）にも使います。
 `tf_future_steps` が 1 以上なら、`/tf` だけは周期の刻みの stamp で、今より先の刻みも送ります（下の「刻みの TF」）。
@@ -371,7 +377,7 @@ flowchart TD
 ### 刻みの TF（`tf_future_steps` ≥ 1）
 
 点群の stamp より後の TF が届くまで、NDT は待ち、MATLAB は前の組で代えます。これをなくすため、`/tf` の stamp を
-周期 T = 1 / `predict_rate` の刻み k·T（整数のナノ秒）にそろえ、今より先の刻みも送ります。
+周期 T = 1 / `publish_rate` の刻み k·T（整数のナノ秒）にそろえ、今より先の刻みも送ります。
 
 - 毎周期、今以前の最後の刻み k0 = floor(t_pub / T) について、k0 − `tf_past_steps` + 1 〜 k0 + `tf_future_steps` の刻みを送る
   （`tf_future_steps: 2`・`tf_past_steps: 1` なら k0・k0+1・k0+2 の 3 個）。1 つの `/tf` メッセージにまとめる。

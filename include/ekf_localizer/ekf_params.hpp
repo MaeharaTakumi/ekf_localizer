@@ -1,29 +1,29 @@
 #ifndef EKF_LOCALIZER__EKF_PARAMS_HPP_
 #define EKF_LOCALIZER__EKF_PARAMS_HPP_
 
-#include <Eigen/Geometry>
+#include <Eigen/Core>
 
-#include <memory>
 #include <string>
 
 #include "rclcpp/rclcpp.hpp"
 
 #include "ekf_localizer/ekf_core.hpp"
-#include "ekf_localizer/lagged_ekf.hpp"
 #include "ekf_localizer/ndt_model.hpp"
 #include "ekf_localizer/odom_model.hpp"
 
 namespace ekf_localizer
 {
 
-/// EKF ノードのパラメータ一式（既定値はここと declareEkfParameters。設定ファイルは localization_bringup の param/<env>/ekf_localizer.yaml）
-struct EkfConfig
+/// EKF ノードのパラメータ一式。
+/// コードの既定値はこの構造体（と EkfCore・NdtModel・OdomModel の Params）の初期値だけで、
+/// declareEkfParameters はここから宣言する。設定ファイルは localization_bringup の param/<env>/ekf_localizer.yaml
+struct EkfParams
 {
   /// オドメトリを観測に使うか
   bool use_odom{true};
   /// 最新の状態を現在時刻まで予測して TF・ekf_pose・ekf_odom を配信する周期 [Hz]
-  double predict_rate{50.0};
-  /// TF を predict_rate の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。
+  double publish_rate{50.0};
+  /// TF を publish_rate の周期の刻み（stamp が周期の整数倍）で送るとき、今より後の刻みを何個送るか。
   /// 0 なら今の時刻の 1 個だけ（刻みにしない）
   int tf_future_steps{0};
   /// tf_future_steps が 1 以上のとき、今以前の刻みを何個送り直すか（0 なら送らない）
@@ -51,25 +51,12 @@ struct EkfConfig
   OdomModel::Params odom;
 };
 
-/// EKF 一式：履歴つきの EKF 本体と、観測モデル
-struct EkfFilter
-{
-  std::shared_ptr<const NdtModel> ndt;
-  /// use_odom: false なら null
-  std::shared_ptr<const OdomModel> odom;
-  /// オドメトリの観測ノイズの計算（直前の速度を覚える）。use_odom: false なら null
-  std::shared_ptr<OdomNoise> odom_noise;
-  std::unique_ptr<LaggedEkf> lagged;
-};
-
-/// EKF のパラメータを宣言する（コンストラクタから呼ぶ）
+/// EKF のパラメータを宣言する（コンストラクタから呼ぶ）。既定値は EkfParams の初期値
 void declareEkfParameters(rclcpp::Node & node);
-/// パラメータを読み込む。不正な値は WARN を出して既定値に戻す
-EkfConfig loadEkfConfig(rclcpp::Node & node);
+/// パラメータを読み込む。不正な値は WARN を出して既定値に戻す。名前を変えた古いパラメータが渡されていれば WARN を出す
+EkfParams loadEkfParams(rclcpp::Node & node);
 /// 読み込んだ値を INFO で出す
-void logEkfConfig(const rclcpp::Logger & logger, const EkfConfig & cfg);
-/// EKF 一式を作る（use_odom: true ならオドメトリの観測モデルも）。mount は base → LiDAR の取付変換
-EkfFilter createFilter(const EkfConfig & cfg, const Eigen::Affine3d & mount);
+void logEkfParams(const rclcpp::Logger & logger, const EkfParams & params);
 
 }  // namespace ekf_localizer
 

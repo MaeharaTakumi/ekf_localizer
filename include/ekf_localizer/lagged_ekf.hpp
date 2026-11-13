@@ -36,10 +36,11 @@ public:
   };
 
   /// 観測を入れた結果（入れた直後の判定。後続の再計算の影響は含まない）
-  struct Result
+  struct AddResult
   {
     Status status{Status::kTooOld};
-    Outcome outcome;
+    /// m を適用した結果（後続の再計算の結果は含まない）
+    ApplyResult apply_result;
     /// 適用し直した後続の観測の数
     std::size_t replayed{0};
   };
@@ -48,7 +49,7 @@ public:
   LaggedEkf(const EkfCore & core, double history_length);
 
   /// 観測を t_z の位置に入れ、後続を適用し直す
-  Result add(const MeasurementPtr & m);
+  AddResult add(const MeasurementPtr & m);
 
   /// 履歴を捨て、EKF を初期化前に戻す（次に初期化できる観測で初期化し直す）
   void reset();
@@ -66,7 +67,7 @@ public:
   std::optional<EkfCore> stateAfter(const MeasurementPtr & m) const;
   std::size_t historySize() const {return history_.size();}
   /// 最新の観測の時刻。履歴が空なら起点の時刻（リセット直後は -inf）
-  double latestStamp() const {return history_.empty() ? anchor_stamp_ : history_.back().m->stamp;}
+  double latestTime() const {return history_.empty() ? anchor_time_ : history_.back().m->time;}
 
 private:
   struct Entry
@@ -81,7 +82,7 @@ private:
 
   EkfCore anchor_;
   /// anchor_ が表す時刻。これより古い観測は捨てる
-  double anchor_stamp_;
+  double anchor_time_;
   std::deque<Entry> history_;
   double history_length_;
 };

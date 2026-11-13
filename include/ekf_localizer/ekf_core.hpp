@@ -9,17 +9,12 @@
 #include <memory>
 #include <vector>
 
+#include "ekf_localizer/pose_utils.hpp"
+
 namespace ekf_localizer
 {
 
 struct Measurement;
-
-/// 角度を (-pi, pi] に正規化する
-double normalizeAngle(double angle);
-/// 回転行列 → [roll, pitch, yaw]（tf2 の getRPY と同じ ZYX 規約）
-Eigen::Vector3d rpyFromRotation(const Eigen::Matrix3d & R);
-/// [roll, pitch, yaw] → 回転行列（ZYX）
-Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw);
 
 /// EKF 本体（センサを知らない部分）
 ///
@@ -39,9 +34,9 @@ Eigen::Matrix3d rotationFromRpy(double roll, double pitch, double yaw);
 class EkfCore
 {
 public:
-  static constexpr int kN = 11;
-  using StateVector = Eigen::Matrix<double, kN, 1>;
-  using StateMatrix = Eigen::Matrix<double, kN, kN>;
+  static constexpr int kStateSize = 11;
+  using StateVector = Eigen::Matrix<double, kStateSize, 1>;
+  using StateMatrix = Eigen::Matrix<double, kStateSize, kStateSize>;
 
   /// 状態の添字
   enum Index
@@ -73,26 +68,26 @@ public:
   };
 
   EkfCore();
-  explicit EkfCore(const Params & p);
+  explicit EkfCore(const Params & params);
 
-  const Params & params() const {return prm_;}
+  const Params & params() const {return params_;}
 
-  /// x0 の位置・姿勢・速度で初期化する。P = diag(p_init)、t_x = stamp、ゲートの状態は 0 に戻す
-  void initialize(const StateVector & x0, double stamp);
+  /// x0 の位置・姿勢・速度で初期化する。P = diag(p_init)、状態の時刻 = t、ゲートの状態は 0 に戻す
+  void initialize(const StateVector & x0, double t);
   /// 未初期化に戻す（初期化用の観測は残し、次の初期化で使う）
   void reset();
   bool initialized() const {return initialized_;}
 
-  /// t_x から stamp まで予測する。未初期化か dt <= 0 なら何もしない。
-  /// dt が max_predict_dt を超える場合は予測だけ切り詰め、t_x は stamp まで進める。
-  void predictTo(double stamp);
+  /// 状態の時刻から t まで予測する。未初期化か dt <= 0 なら何もしない。
+  /// dt が max_predict_dt を超える場合は予測だけ切り詰め、状態の時刻は t まで進める。
+  void predictTo(double t);
 
   /// 一般形の KF 更新。y = z - h(x) は角度成分を wrap して渡す。
-  /// d² = yᵀ S⁻¹ y が gate 以下なら更新して true、棄却なら状態を変えず false
+  /// d² = yᵀ S⁻¹ y が gate_threshold 以下なら更新して true、棄却なら状態を変えず false
   template<int M>
   bool kalmanUpdate(
-    const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, kN> & H,
-    const Eigen::Matrix<double, M, M> & R, double gate, double & d2_out);
+    const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, kStateSize> & H,
+    const Eigen::Matrix<double, M, M> & R, double gate_threshold, double & d2_out);
 
   const StateVector & state() const {return x_;}
   const StateMatrix & covariance() const {return P_;}
@@ -106,13 +101,13 @@ public:
   double vXy() const {return x_(kVxy);}
   /// yaw の角速度 omega_yaw
   double omegaYaw() const {return x_(kOmegaYaw);}
-  /// 状態が表している時刻 t_x [s]（最後に予測・初期化した時刻）
-  double lastStamp() const {return t_last_;}
+  /// 状態の時刻 t_x [s]（最後に予測・初期化した時刻）
+  double time() const {return time_;}
 
   /// ゲートを n 個確保し、先頭の番号を返す（観測モデルの作成時に呼ぶ）
   int addGates(int n);
-  GateState & gate(int i) {return gates_.at(i);}
-  const GateState & gate(int i) const {return gates_.at(i);}
+  GateState & gateState(int index) {return gates_.at(index);}
+  const GateState & gateState(int index) const {return gates_.at(index);}
 
   /// 初期化用の観測
   void setInitAid(std::shared_ptr<const Measurement> m) {init_aid_ = std::move(m);}
@@ -130,25 +125,25 @@ public:
 private:
   StateVector x_{StateVector::Zero()};
   StateMatrix P_{StateMatrix::Identity()};
-  double t_last_{0.0};
+  double time_{0.0};
   bool initialized_{false};
   std::vector<GateState> gates_;
   std::shared_ptr<const Measurement> init_aid_;
-  Params prm_;
+  Params params_;
 };
 
 template<int M>
 bool EkfCore::kalmanUpdate(
-  const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, kN> & H,
-  const Eigen::Matrix<double, M, M> & R, double gate, double & d2_out)
+  const Eigen::Matrix<double, M, 1> & y, const Eigen::Matrix<double, M, kStateSize> & H,
+  const Eigen::Matrix<double, M, M> & R, double gate_threshold, double & d2_out)
 {
   const Eigen::Matrix<double, M, M> S = H * P_ * H.transpose() + R;
   const Eigen::Matrix<double, M, M> S_inv = S.inverse();
   const double d2 = y.dot(S_inv * y);
   d2_out = d2;
-  if (!std::isfinite(d2) || d2 > gate) {return false;}
+  if (!std::isfinite(d2) || d2 > gate_threshold) {return false;}
 
-  const Eigen::Matrix<double, kN, M> K = P_ * H.transpose() * S_inv;
+  const Eigen::Matrix<double, kStateSize, M> K = P_ * H.transpose() * S_inv;
   x_ += K * y;
   wrapAngles(x_);
   const StateMatrix IKH = StateMatrix::Identity() - K * H;
