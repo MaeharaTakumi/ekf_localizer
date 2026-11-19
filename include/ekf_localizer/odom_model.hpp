@@ -24,9 +24,9 @@ public:
   struct Params
   {
     /// 観測ノイズ [v, omega] の分散 [m^2/s^2], [rad^2/s^2]（速さ・加速度によらない分）
-    Eigen::Vector2d r{6.08e-3, 9.92e-4};
+    Eigen::Vector2d r{1.0e-8, 1.0e-8};
     /// 速さに応じた分の係数 [v^2 -> R_v, omega^2 -> R_v, v^2 -> R_omega, omega^2 -> R_omega]
-    Eigen::Vector4d alpha{Eigen::Vector4d::Zero()};
+    Eigen::Vector4d alpha{1.0e-6, 1.0e-3, 1.0e-6, 1.0e-3};
     /// 加速度に応じた分の時定数 [tau_v, tau_omega] [s]
     Eigen::Vector2d tau{Eigen::Vector2d::Zero()};
     /// ゲート（マハラノビス距離の 2 乗の上限）。1e5 は実質無効（χ²(2) の 99% は 9.21）

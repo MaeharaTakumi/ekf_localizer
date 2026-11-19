@@ -341,6 +341,8 @@ TEST(OdomNoise, FixedWhenAlphaAndTauAreZero)
 {
   OdomModel::Params p;
   p.r = Eigen::Vector2d(6.08e-3, 9.92e-4);
+  p.alpha = Eigen::Vector4d::Zero();  // 既定の alpha は 0 でないので明示的に 0 にする
+  p.tau = Eigen::Vector2d::Zero();
   OdomNoise noise(p);
   EXPECT_TRUE(noise.variance(1.0, 0.5, 0.2).isApprox(p.r));
   EXPECT_TRUE(noise.variance(1.02, 1.5, -1.0).isApprox(p.r));
@@ -361,6 +363,7 @@ TEST(OdomNoise, AccelTermsFromPreviousMessage)
 {
   OdomModel::Params p;
   p.r = Eigen::Vector2d(1.0e-3, 2.0e-3);
+  p.alpha = Eigen::Vector4d::Zero();  // 速さの項を除いて加速度の項だけを見る
   p.tau = Eigen::Vector2d(0.5, 0.25);
   OdomNoise noise(p);
 
