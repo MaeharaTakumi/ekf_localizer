@@ -196,7 +196,7 @@ dyaw/dt   = omega_yaw           pitch += omega_pitch dt
 
 | 記号 | 意味 |
 |---|---|
-| t_s | メッセージの `header.stamp` |
+| t_s | メッセージの `header.stamp`。`ndt_stamp_mode`・`odom_stamp_mode` が受け取った時刻を選んだときは、EKF が受け取った時刻 |
 | t_d | 観測の遅れ（NDT：`ndt_delay`、オドメトリ：`odom_delay`） |
 | t_z | 観測の時刻。t_z = t_s − t_d |
 | t_x | 状態が表す時刻（最後に初期化・予測した時刻） |
@@ -342,9 +342,10 @@ NDT の初期値と MATLAB の点群の座標変換は、この `/tf` を点群�
 （2026-10-26 まであった `publish_trigger` の `cloud`（点群が届くたびに、その stamp の時刻の予測値）・`update`（更新するたびに、
 その時刻の事後推定値）と、MATLAB 用の `base_pose`・`vlp16_pose`・`vlp16_points`、NDT で更新した直後の値を出す `tf_ndt_update` はやめた。）
 
-NDT の観測の時刻はメッセージの stamp です。受信した時刻を使うとき（NDT の `stamp_mode` が `receipt`・`auto`）は、NDT が `/ndt_pose` の
-stamp に点群の受信時刻を入れます（点群のトピック自体の stamp は変えません）。オドメトリの観測の時刻は `odom_stamp_mode` で、stamp か
-このノードが受け取った時刻にします（`/ndt_pose` の受信時刻は NDT の計算の遅れを含むので、NDT には使わない。開発ログ 20）。
+観測の時刻は、NDT は `ndt_stamp_mode`、オドメトリは `odom_stamp_mode` で、メッセージの stamp かこのノードが受け取った時刻にします
+（どちらも既定は `stamp`）。`ndt_stamp_mode: receipt` は NDT の計算と通信の遅れを含むので、`stamp` との比較用です（開発ログ 20・113）。
+点群を受け取った時刻を使うときは NDT の `stamp_mode` を `receipt`・`auto` にすると、NDT が `/ndt_pose` の stamp にその時刻を入れます
+（点群のトピック自体の stamp は変えません）。
 
 流れ：
 
@@ -400,15 +401,16 @@ flowchart TD
 
 ## 時刻
 
-すべての観測は `header.stamp` で時刻順に並べるので、観測の時刻が同じ時計で測られていることが前提です。
+すべての観測は観測の時刻 t_z（既定は `header.stamp` から）で時刻順に並べるので、観測の時刻が同じ時計で測られていることが前提です。
 
 | 環境 | 時計 | 点群の stamp | オドメトリの stamp |
 |---|---|---|---|
 | Gazebo | sim time（`/clock`） | Gazebo が付けた値をそのまま使う | Gazebo が付けた値をそのまま使う |
 | 実機 | この PC の時計（LiDAR の PC・ラズパイと時刻同期している） | LiDAR の PC が付けた値をそのまま使う | ラズパイが付けた値をそのまま使う（whill_odometry の `use_stamped_input: true`） |
 
-今はどの環境も stamp をそのまま使います（NDT の `stamp_mode`・このノードの `odom_stamp_mode` とも `stamp`）。時計がずれている環境では、
-両方を `receipt`（受け取った時刻）か `auto`（ずれが閾値以上のときだけ受け取った時刻）にします（4 章）。
+今はどの環境も stamp をそのまま使います（NDT の `stamp_mode`・このノードの `ndt_stamp_mode`・`odom_stamp_mode` とも `stamp`）。
+時計がずれている環境では、NDT の `stamp_mode` と `odom_stamp_mode` を `receipt`（受け取った時刻）か `auto`（ずれが閾値以上のときだけ
+受け取った時刻）にします（4 章）。
 
 ## パラメータ
 

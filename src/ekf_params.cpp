@@ -49,6 +49,8 @@ void declareEkfParameters(rclcpp::Node & node)
   node.declare_parameter("R_ndt", toStdVector(d.ndt.r));
   node.declare_parameter("ndt_gate", d.ndt.gate_threshold);
   node.declare_parameter("ndt_delay", d.ndt_delay);
+  node.declare_parameter("ndt_stamp_mode", d.ndt_stamp_mode);
+  node.declare_parameter("ndt_stamp_auto_threshold", d.ndt_stamp_auto_threshold);
 
   // オドメトリの観測（use_odom: true のみ）
   node.declare_parameter("R_odom", toStdVector(d.odom.r));
@@ -88,6 +90,17 @@ EkfParams loadEkfParams(rclcpp::Node & node)
         return false;
       }
       return true;
+    };
+  // 観測の時刻の決め方。stamp・receipt・auto でなければ既定値のまま WARN を出す。
+  const auto load_stamp_mode = [&](const std::string & name, std::string & out) {
+      const std::string def = out;
+      node.get_parameter(name, out);
+      if (out != "stamp" && out != "receipt" && out != "auto") {
+        RCLCPP_WARN(
+          logger, "%s must be stamp, receipt or auto (got \"%s\"). Using %s.",
+          name.c_str(), out.c_str(), def.c_str());
+        out = def;
+      }
     };
 
   node.get_parameter("use_odom", params.use_odom);
@@ -163,6 +176,8 @@ EkfParams loadEkfParams(rclcpp::Node & node)
       params.ndt_delay, defaults.ndt_delay);
     params.ndt_delay = defaults.ndt_delay;
   }
+  load_stamp_mode("ndt_stamp_mode", params.ndt_stamp_mode);
+  node.get_parameter("ndt_stamp_auto_threshold", params.ndt_stamp_auto_threshold);
 
   OdomModel::Params & odom = params.odom;
   if (load("R_odom", 2, r_odom)) {
@@ -196,15 +211,7 @@ EkfParams loadEkfParams(rclcpp::Node & node)
   if (load("odom_scale", 2, odom_scale)) {
     params.odom_scale = Eigen::Map<const Eigen::Vector2d>(odom_scale.data());
   }
-  node.get_parameter("odom_stamp_mode", params.odom_stamp_mode);
-  if (params.odom_stamp_mode != "stamp" && params.odom_stamp_mode != "receipt" &&
-    params.odom_stamp_mode != "auto")
-  {
-    RCLCPP_WARN(
-      logger, "odom_stamp_mode must be stamp, receipt or auto (got \"%s\"). Using %s.",
-      params.odom_stamp_mode.c_str(), defaults.odom_stamp_mode.c_str());
-    params.odom_stamp_mode = defaults.odom_stamp_mode;
-  }
+  load_stamp_mode("odom_stamp_mode", params.odom_stamp_mode);
   node.get_parameter("odom_stamp_auto_threshold", params.odom_stamp_auto_threshold);
 
   return params;
@@ -234,7 +241,9 @@ void logEkfParams(const rclcpp::Logger & logger, const EkfParams & params)
     logger, "ekf ndt_gate: %lf (NDT observed as the base pose, 6 components at once)",
     ndt.gate_threshold);
   RCLCPP_INFO(logger, "ekf max_predict_dt: %lf", core.max_predict_dt);
-  RCLCPP_INFO(logger, "ekf ndt_delay: %lf s", params.ndt_delay);
+  RCLCPP_INFO(
+    logger, "ekf ndt_delay: %lf s, ndt_stamp_mode: %s (ndt_stamp_auto_threshold %g s)",
+    params.ndt_delay, params.ndt_stamp_mode.c_str(), params.ndt_stamp_auto_threshold);
   const auto join = [](const EkfCore::StateVector & v) {
       std::string out;
       for (int i = 0; i < v.size(); ++i) {

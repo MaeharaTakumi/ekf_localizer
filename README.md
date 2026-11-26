@@ -8,7 +8,8 @@ NDT の位置推定（`ndt_pose`）と車輪オドメトリを融合する 11 �
   `v_z`・`omega_roll`・`omega_pitch` は `Q`・`P_init` を 0 にすると 0 のまま動かず、足す前の 8 状態と同じになる（Gazebo の環境ファイル（localization_bringup の `param/gazebo/ekf_localizer.yaml`）の `Q` は 3 つとも 0。
   コードの既定は 2026-11-09 から実機 blue の値で、`omega_roll`・`omega_pitch` の `Q` 0.1・`v_z` 0）
 - 観測：NDT の LiDAR 姿勢（取付 `base → LiDAR` は静的 TF から読む）、オドメトリの `[v_xy, omega_yaw]`（`use_odom: true`）
-- **観測の遅れ**：NDT は `ndt_delay`、オドメトリは `odom_delay` 秒だけ stamp を戻して入れます
+- **観測の時刻**：`ndt_stamp_mode`・`odom_stamp_mode`（`stamp` 既定 / `receipt` / `auto`）で、メッセージの stamp かこのノードが受け取った時刻を選びます
+- **観測の遅れ**：NDT は `ndt_delay`、オドメトリは `odom_delay` 秒だけ、選んだ時刻を戻して入れます
   （既定はどちらも 0。Gazebo の diff_drive_controller が twist を 0.2 s の移動平均で出していたころは `odom_delay` 0.09 s。
   2026-10-12 に移動平均を 1 にしてからは 0）。
 - **巻き戻し（ルックバック）**：NDT の解は点群の取得時刻の観測として、遅れて届きます。
@@ -97,7 +98,9 @@ NDT の更新も過去の刻みに入り、点群の stamp で引く値が、引
 
 | 名前 | 値 | 説明 |
 |---|---|---|
-| `ndt_delay` | 0.0 | NDT の遅れ [s]。点群の取得時刻が stamp より前の分を、stamp から引いて補う。`[0, history_length)` の範囲 |
+| `ndt_stamp_mode` | `stamp` | NDT の観測の時刻の決め方。値の意味は `odom_stamp_mode` と同じ（`stamp` / `receipt` / `auto`）。`receipt` はこのノードが `ndt_pose` を受け取った時刻で、点群の取得より通信と位置合わせの分だけ後になる（`stamp` との比較用）。`auto` は \|受け取った時刻 − stamp\| にこの遅れも入るので、時計が合っていても遅れが閾値以上の回は受け取った時刻になる。NDT の `stamp_mode`（`ndt_pose` の stamp に点群の受信時刻を入れる）とは別 |
+| `ndt_stamp_auto_threshold` | 0.1 | `ndt_stamp_mode: auto` の閾値 [s] |
+| `ndt_delay` | 0.0 | NDT の遅れ [s]。点群の取得時刻が、`ndt_stamp_mode` で選んだ時刻より前の分を引いて補う（`stamp` と `receipt` で合う値が違う）。`[0, history_length)` の範囲 |
 | `ndt_gate` | 1.0e5 | NDT のゲート（マハラノビス距離の 2 乗の上限。1.0e5 は実質無効。χ²(6) の 99% は 16.81 で、テストはこの値にする）。NDT の解は base の姿勢に直して 6 成分を 1 回で更新するので、ゲートを効かせると、どれか 1 成分が大きくずれても観測全体を使わない |
 
 ### オドメトリ（`use_odom: true` のみ）
@@ -108,10 +111,10 @@ NDT の更新も過去の刻みに入り、点群の stamp で引く値が、引
 | `odom_noise_tau` | [0, 0] | オドメトリの観測ノイズの加速度に応じた分の時定数 [τ_v, τ_omega] [s]。加速度は直前のメッセージとの差 |
 | `odom_gate` | 1.0e5 | オドメトリのゲート（1.0e5 は実質無効。χ²(2) の 99% は 9.21 で、テストはこの値にする） |
 | `odom_scale` | [1.0, 1.0] | オドメトリの v, omega に掛ける倍率 [v, omega]（実効的な車輪間隔・半径が設定と違う分の補正。Gazebo は [1.0, 0.922]）。観測ノイズはこの倍率を掛けた値から計算する。2026-11-11 に localization_bringup の `odom_relay` から移した |
-| `odom_stamp_mode` | `stamp` | オドメトリの観測の時刻の決め方。`stamp`：メッセージの stamp / `receipt`：このノードが受け取った時刻 / `auto`：\|受け取った時刻 − stamp\| が `odom_stamp_auto_threshold` 以上なら受け取った時刻、小さければ stamp（1 つずつ判断し、10 s ごとに使った数をログに出す）。sim time で `/clock` を受け取る前は stamp。NDT の観測は常に stamp（受信した時刻を使うときは NDT の `stamp_mode` が `/ndt_pose` の stamp に点群の受信時刻を入れる） |
-| `odom_stamp_auto_threshold` | 0.1 | `auto` の閾値 [s] |
+| `odom_stamp_mode` | `stamp` | オドメトリの観測の時刻の決め方。`stamp`：メッセージの stamp / `receipt`：このノードが受け取った時刻 / `auto`：\|受け取った時刻 − stamp\| が `odom_stamp_auto_threshold` 以上なら受け取った時刻、小さければ stamp（1 つずつ判断し、10 s ごとに使った数をログに出す）。sim time で `/clock` を受け取る前は stamp。NDT の観測は `ndt_stamp_mode` |
+| `odom_stamp_auto_threshold` | 0.1 | `odom_stamp_mode: auto` の閾値 [s] |
 | `odom_timeout_init` | 0.2 | 初期化のとき、この時間以内のオドメトリがあれば v, omega をその値から始める [s] |
-| `odom_delay` | 0.0 | オドメトリの遅れ [s]。stamp から引いて補う。`[0, history_length)` の範囲 |
+| `odom_delay` | 0.0 | オドメトリの遅れ [s]。`odom_stamp_mode` で選んだ時刻から引いて補う。`[0, history_length)` の範囲 |
 
 ## テスト
 

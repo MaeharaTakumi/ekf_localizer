@@ -3,6 +3,8 @@
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -29,8 +31,9 @@ namespace ekf_localizer
 ///         時刻では前の刻みの最後に届いた値と後の刻みの最初に届いた値を補間する）
 ///
 ///   観測は届いた時点で、観測モデルで観測にして LaggedEkf に入れる。
-///   NDT の観測の時刻はメッセージの stamp（受信した時刻を使うときは NDT の stamp_mode が点群の受信時刻を stamp に入れる）。
-///   オドメトリは odom_stamp_mode で stamp か、このノードが受け取った時刻を使い、v, omega に odom_scale を掛ける。
+///   観測の時刻は、NDT は ndt_stamp_mode、オドメトリは odom_stamp_mode で、stamp か、このノードが受け取った時刻を使う
+///   （NDT の stamp_mode が receipt・auto なら、ndt_pose の stamp は NDT が点群を受け取った時刻）。
+///   オドメトリの v, omega には odom_scale を掛ける。
 ///   NDT は遅れて届くので、その stamp まで巻き戻してそれ以降のオドメトリを適用し直す。
 ///   取付 base → LiDAR は TF（静的）から読む。読めるまでは観測を捨てる。
 class EkfLocalizer : public rclcpp::Node
@@ -45,8 +48,20 @@ private:
   void timerCallback();
   /// 取付 base → LiDAR を TF から読んで EKF を作る（タイマーから呼ぶ）。作れたら true
   bool tryCreateFilter();
-  /// オドメトリの時刻：odom_stamp_mode で、stamp か、このノードが受け取った時刻（sim time で /clock を受け取る前は stamp）
-  builtin_interfaces::msg::Time odomStamp(const builtin_interfaces::msg::Time & stamp);
+  /// auto のログ用の数え上げ（観測の種類ごと）
+  struct StampStats
+  {
+    int count{0};                           // 受け取った数
+    int receipt_count{0};                   // 受け取った時刻を使った数
+    double max_abs_offset{0.0};             // |受け取った時刻 − stamp| の最大 [s]
+    std::optional<double> last_log_time;    // 最後にログを出した時刻 [s]
+  };
+  /// 観測の時刻：mode（stamp・receipt・auto）で、stamp か、このノードが受け取った時刻を返す
+  /// （sim time で /clock を受け取る前は stamp）。auto は |受け取った時刻 − stamp| が auto_threshold 以上なら
+  /// 受け取った時刻にし、10 s ごとに使った数を name を付けてログに出す
+  builtin_interfaces::msg::Time selectStamp(
+    const builtin_interfaces::msg::Time & stamp, const std::string & mode, double auto_threshold,
+    const char * name, StampStats & stats);
   /// 観測を LaggedEkf に入れ、結果をログに出す（どのセンサも共通）
   void addMeasurement(const MeasurementPtr & m);
   /// ekf の推定値を stamp の時刻として ekf_pose・ekf_odom に配信する（TF は timerCallback が送る）
@@ -71,10 +86,9 @@ private:
   rclcpp::Time last_publish_stamp_;
   /// タイマーの周期と TF の刻みの幅 [ns]（1 / publish_rate）
   int64_t period_ns_{20000000};
-  /// odom_stamp_mode: auto のログ用：受け取った数、受け取った時刻を使った数、|受け取った時刻 − stamp| の最大 [s]
-  int odom_count_{0};
-  int odom_receipt_count_{0};
-  double odom_max_abs_offset_{0.0};
+  /// ndt_stamp_mode・odom_stamp_mode が auto のときの数え上げ
+  StampStats ndt_stamp_stats_;
+  StampStats odom_stamp_stats_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

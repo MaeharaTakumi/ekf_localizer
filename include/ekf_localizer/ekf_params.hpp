@@ -34,7 +34,11 @@ struct EkfParams
   std::string base_frame_id{"base_link"};
   /// NDT が推定する LiDAR のフレーム（取付 base → LiDAR は TF から読む）
   std::string lidar_frame_id{"velodyne"};
-  /// NDT の遅れ [s]。点群の取得時刻が stamp より前の分を、stamp から引いて補う
+  /// NDT の観測の時刻の決め方：値は odom_stamp_mode と同じ "stamp"・"receipt"・"auto"。このノードが NDT の解を
+  /// 受け取る時刻は、点群の取得より通信と位置合わせの分だけ後（stamp との比較用）
+  std::string ndt_stamp_mode{"stamp"};
+  double ndt_stamp_auto_threshold{0.1};
+  /// NDT の遅れ [s]。点群の取得時刻が、ndt_stamp_mode で選んだ時刻より前の分を引いて補う
   double ndt_delay{0.0};
   /// オドメトリの遅れ [s]。twist が実際の動きより遅れる分（移動平均など）を、stamp から引いて補う
   double odom_delay{0.0};

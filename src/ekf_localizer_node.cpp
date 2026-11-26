@@ -94,22 +94,28 @@ bool EkfLocalizer::tryCreateFilter()
   return true;
 }
 
-builtin_interfaces::msg::Time EkfLocalizer::odomStamp(const builtin_interfaces::msg::Time & stamp)
+builtin_interfaces::msg::Time EkfLocalizer::selectStamp(
+  const builtin_interfaces::msg::Time & stamp, const std::string & mode, double auto_threshold,
+  const char * name, StampStats & stats)
 {
-  if (params_.odom_stamp_mode == "stamp") {return stamp;}
+  if (mode == "stamp") {return stamp;}
   const rclcpp::Time t_receipt = now();
   if (t_receipt.nanoseconds() == 0) {return stamp;}   // sim time で /clock をまだ受け取っていない
   const double offset = t_receipt.seconds() - rclcpp::Time(stamp, RCL_ROS_TIME).seconds();
-  const bool use_receipt = params_.odom_stamp_mode == "receipt" ||
-    std::abs(offset) >= params_.odom_stamp_auto_threshold;
-  if (params_.odom_stamp_mode == "auto") {
-    ++odom_count_;
-    odom_receipt_count_ += use_receipt ? 1 : 0;
-    odom_max_abs_offset_ = std::max(odom_max_abs_offset_, std::abs(offset));
-    RCLCPP_INFO_THROTTLE(
-      get_logger(), *get_clock(), 10000,
-      "auto: receipt time used for %d of %d odometry messages (|receipt - stamp| latest %.1f ms, max %.1f ms)",
-      odom_receipt_count_, odom_count_, offset * 1e3, odom_max_abs_offset_ * 1e3);
+  const bool use_receipt = mode == "receipt" || std::abs(offset) >= auto_threshold;
+  if (mode == "auto") {
+    ++stats.count;
+    stats.receipt_count += use_receipt ? 1 : 0;
+    stats.max_abs_offset = std::max(stats.max_abs_offset, std::abs(offset));
+    // 10 s ごと（時計が戻ったときはすぐ）。RCLCPP_INFO_THROTTLE は呼び出し箇所で間隔を共有するので使わない
+    const double t = t_receipt.seconds();
+    if (!stats.last_log_time || t - *stats.last_log_time >= 10.0 || t < *stats.last_log_time) {
+      stats.last_log_time = t;
+      RCLCPP_INFO(
+        get_logger(),
+        "auto: receipt time used for %d of %d %s messages (|receipt - stamp| latest %.1f ms, max %.1f ms)",
+        stats.receipt_count, stats.count, name, offset * 1e3, stats.max_abs_offset * 1e3);
+    }
   }
   return use_receipt ? static_cast<builtin_interfaces::msg::Time>(t_receipt) : stamp;
 }
@@ -165,8 +171,12 @@ void EkfLocalizer::ndtPoseReceived(
   NdtModel::Vector6d z;
   z << p.position.x, p.position.y, p.position.z, roll, pitch, yaw;
 
-  // 点群の取得時刻が stamp より ndt_delay だけ前のときに補う
-  const double t = measurementTime(msg->header.stamp, params_.ndt_delay);
+  // 時刻は ndt_stamp_mode で stamp か受け取った時刻
+  const builtin_interfaces::msg::Time stamp = selectStamp(
+    msg->header.stamp, params_.ndt_stamp_mode, params_.ndt_stamp_auto_threshold,
+    "NDT pose", ndt_stamp_stats_);
+  // 点群の取得時刻がその時刻より ndt_delay だけ前のときに補う
+  const double t = measurementTime(stamp, params_.ndt_delay);
   addMeasurement(filter_.ndt->measurement(z, t));
 }
 
@@ -178,7 +188,9 @@ void EkfLocalizer::odomReceived(const nav_msgs::msg::Odometry::ConstSharedPtr ms
   const double v = msg->twist.twist.linear.x * params_.odom_scale(0);
   const double omega = msg->twist.twist.angular.z * params_.odom_scale(1);
   // 時刻は odom_stamp_mode で stamp か受け取った時刻
-  const builtin_interfaces::msg::Time stamp = odomStamp(msg->header.stamp);
+  const builtin_interfaces::msg::Time stamp = selectStamp(
+    msg->header.stamp, params_.odom_stamp_mode, params_.odom_stamp_auto_threshold,
+    "odometry", odom_stamp_stats_);
   // 観測ノイズは R_odom と速さ・加速度から計算する（メッセージの共分散は使わない）
   const Eigen::Vector2d r =
     filter_.odom_noise->variance(rclcpp::Time(stamp, RCL_ROS_TIME).seconds(), v, omega);
