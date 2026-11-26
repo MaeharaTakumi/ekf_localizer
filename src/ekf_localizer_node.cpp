@@ -221,8 +221,9 @@ void EkfLocalizer::timerCallback()
 void EkfLocalizer::publishTfGrid(int64_t t_ns)
 {
   // 刻み k·T の TF を、今より後の tf_future_steps 個と今以前の tf_past_steps 個、1 つのメッセージで送る。
-  // 同じ刻みは周期ごとに新しい値で送り直し、購読側の tf2 で置き換わる。値は t 以前の観測だけを入れた状態を
-  // その刻みまで予測したもの（未来の刻みは最新の状態の予測、過ぎた刻みは遅れて届いた観測も入れた値）
+  // 同じ刻みは周期ごとに新しい値で送り直す。購読側の tf2 は置き換えずに重ねて持ち、刻みの間の時刻では前の刻みの
+  // 最後に届いた値と後の刻みの最初に届いた値を補間する。値は t 以前の観測だけを入れた状態をその刻みまで
+  // 予測したもの（未来の刻みは最新の状態の予測、過ぎた刻みは遅れて届いた観測も入れた値）
   std::vector<geometry_msgs::msg::TransformStamped> tfs;
   for (const int64_t k_ns : tfGridStamps(
       t_ns, period_ns_, params_.tf_future_steps, params_.tf_past_steps))
